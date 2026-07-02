@@ -18,6 +18,7 @@ import { AdminPage } from '@/pages/admin/page'
 import { ParserConfigsPage } from '@/pages/admin/parser-configs'
 import { QARetrievalTestPage } from '@/pages/admin/qa-retrieval-test'
 import { QASettings } from '@/pages/admin/qa-settings'
+import { QASystemPromptPage } from '@/pages/admin/qa-system-prompt'
 import { StatsOverviewPage } from '@/pages/admin/stats-overview'
 import { StyleManagement } from '@/pages/admin/style-management'
 import { SystemSettings } from '@/pages/admin/system-settings'
@@ -115,6 +116,10 @@ async function redirectToAdminHome() {
     throw redirect({ to: '/admin/knowledge-config' })
   }
 
+  if (canAccess(store.user, qaSettingsReadAccess)) {
+    throw redirect({ to: '/admin/prompts' })
+  }
+
   if (canAccess(store.user, qaAdminAccess)) {
     throw redirect({ to: '/admin/qa-settings' })
   }
@@ -130,6 +135,7 @@ const qaAccess: PermissionRequirement = { any: ['qa:use'] }
 const qaAdminAccess: PermissionRequirement = {
   any: ['admin:model-profile:write', 'admin:parser-config:write', 'system:admin'],
 }
+const qaSettingsReadAccess: PermissionRequirement = { any: ['qa:settings:read'] }
 const reportAccess: PermissionRequirement = {
   any: ['report:read', 'report:write', 'reports:write'],
 }
@@ -151,6 +157,7 @@ const adminAccess: PermissionRequirement = {
     'document:upload',
     'admin:model-profile:write',
     'admin:parser-config:write',
+    'qa:settings:read',
   ],
 }
 
@@ -344,6 +351,13 @@ const adminQASettingsRoute = createRoute({
   component: QASettings,
 })
 
+const adminQASystemPromptRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: 'prompts',
+  beforeLoad: requireAuth(qaSettingsReadAccess),
+  component: QASystemPromptPage,
+})
+
 const adminQARetrievalTestRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: 'qa-retrieval-test',
@@ -421,6 +435,7 @@ const routeTree = rootRoute.addChildren([
       adminKnowledgeSearchRoute,
       adminKnowledgeChunksRoute,
       adminQASettingsRoute,
+      adminQASystemPromptRoute,
       adminQARetrievalTestRoute,
       adminModelProfilesRoute,
       adminParserConfigsRoute,

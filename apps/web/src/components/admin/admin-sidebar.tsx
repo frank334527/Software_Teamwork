@@ -32,7 +32,15 @@ const menuItems: AdminNavigationItem[] = [
   {
     key: 'system',
     label: '系统管理',
-    children: [{ key: 'styles', label: '样式管理', path: '/admin/styles' }],
+    children: [
+      { key: 'styles', label: '样式管理', path: '/admin/styles' },
+      {
+        key: 'prompts',
+        label: 'Agent 提示词',
+        path: '/admin/prompts',
+        requirement: { any: ['qa:settings:read'] },
+      },
+    ],
   },
   {
     key: 'reports',
