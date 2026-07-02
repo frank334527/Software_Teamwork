@@ -136,6 +136,7 @@ const qaAdminAccess: PermissionRequirement = {
   any: ['admin:model-profile:write', 'admin:parser-config:write', 'system:admin'],
 }
 const qaSettingsReadAccess: PermissionRequirement = { any: ['qa:settings:read'] }
+const systemAdminAccess: PermissionRequirement = { any: ['system:admin'] }
 const reportAccess: PermissionRequirement = {
   any: ['report:read', 'report:write', 'reports:write'],
 }
@@ -256,7 +257,7 @@ const adminIndexRoute = createRoute({
 const adminStylesRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: 'styles',
-  beforeLoad: requireAuth(),
+  beforeLoad: requireAuth(systemAdminAccess),
   component: StyleManagement,
 })
 
@@ -368,7 +369,7 @@ const adminQARetrievalTestRoute = createRoute({
 const adminSettingsRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: 'settings',
-  beforeLoad: requireAuth({ any: ['system:admin'] }),
+  beforeLoad: requireAuth(systemAdminAccess),
   component: SystemSettings,
 })
 
