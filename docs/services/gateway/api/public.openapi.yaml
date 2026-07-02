@@ -5613,6 +5613,9 @@ components:
             multi-byte UTF-8 characters count toward the byte limit.
         isActive:
           type: boolean
+        createdBy:
+          type: string
+          description: User id that created this QA config version.
         createdAt:
           type: string
           format: date-time

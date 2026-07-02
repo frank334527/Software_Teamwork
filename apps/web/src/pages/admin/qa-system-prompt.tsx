@@ -1,7 +1,8 @@
-import { AlertTriangle, CheckCircle2, RefreshCw, Rocket } from 'lucide-react'
+import { RefreshCw, Rocket } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { ApiError } from '@/api/client'
+import { ConfirmDialog, InlineNotice, StateBlock } from '@/components/common'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -29,29 +30,6 @@ function formatDate(value?: string): string {
   return value ? new Date(value).toLocaleString() : '-'
 }
 
-function StatusMessage({
-  type,
-  message,
-}: {
-  type: 'success' | 'error' | 'warning'
-  message: string
-}) {
-  const Icon = type === 'success' ? CheckCircle2 : AlertTriangle
-  const className =
-    type === 'success'
-      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700'
-      : type === 'warning'
-        ? 'border-amber-500/30 bg-amber-500/10 text-amber-700'
-        : 'border-destructive/30 bg-destructive/10 text-destructive'
-
-  return (
-    <div className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${className}`}>
-      <Icon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-      <span>{message}</span>
-    </div>
-  )
-}
-
 export function QASystemPromptPage() {
   const user = useAuthStore((state) => state.user)
   const canWrite = canAccess(user, { any: ['qa:settings:write'] })
@@ -59,6 +37,7 @@ export function QASystemPromptPage() {
   const createMutation = useCreateQAConfigVersionMutation()
   const [draft, setDraft] = useState('')
   const [lastSyncedVersionId, setLastSyncedVersionId] = useState<string | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
@@ -99,7 +78,7 @@ export function QASystemPromptPage() {
     }
   }
 
-  const publish = async () => {
+  const requestPublish = () => {
     if (!current || !canWrite) return
 
     setError(null)
@@ -111,18 +90,21 @@ export function QASystemPromptPage() {
       return
     }
 
-    const confirmed = window.confirm(
-      `确认发布全局 Agent 系统提示词？\n\n当前版本：${current.versionNo}\n影响范围：所有用户；发布后从下一次提问生效；正在生成的回答不受影响。`,
-    )
-    if (!confirmed) return
+    setConfirmOpen(true)
+  }
+
+  const publish = async () => {
+    if (!current || !canWrite) return
 
     try {
       const created = await createMutation.mutateAsync(buildSystemPromptPayload(current, draft))
       setLastSyncedVersionId(created.id)
       setDraft(created.systemPrompt)
       setSuccess(`Agent 提示词版本 ${created.versionNo} 已发布`)
+      setConfirmOpen(false)
     } catch (publishError) {
       setError(`发布失败：${getErrorMessage(publishError)}`)
+      setConfirmOpen(false)
     }
   }
 
@@ -146,26 +128,47 @@ export function QASystemPromptPage() {
         </Button>
       </div>
 
-      <StatusMessage
-        type="warning"
-        message="该提示词适用于所有用户；发布后从下一次提问生效；正在生成的回答不受影响。"
-      />
+      <InlineNotice variant="warning">
+        该提示词适用于所有用户；发布后从下一次提问生效；正在生成的回答不受影响。
+      </InlineNotice>
 
       {!canWrite && (
-        <StatusMessage type="warning" message="当前账号只有读取权限，页面为只读模式。" />
+        <InlineNotice variant="warning">当前账号只有读取权限，页面为只读模式。</InlineNotice>
       )}
-      {loadError && <StatusMessage type="error" message={`加载提示词失败：${loadError}`} />}
-      {error && <StatusMessage type="error" message={error} />}
-      {success && <StatusMessage type="success" message={success} />}
+      {loadError && current && (
+        <InlineNotice variant="error">加载提示词失败：{loadError}</InlineNotice>
+      )}
+      {error && <InlineNotice variant="error">{error}</InlineNotice>}
+      {success && <InlineNotice variant="success">{success}</InlineNotice>}
       {isDirty && (
-        <StatusMessage
-          type="warning"
-          message="存在未保存变更。刷新到新版本时会保留当前草稿，发布成功后才覆盖。"
-        />
+        <InlineNotice variant="warning">
+          存在未保存变更。刷新到新版本时会保留当前草稿，发布成功后才覆盖。
+        </InlineNotice>
       )}
 
       {qaConfigQuery.isLoading ? (
-        <div className="h-[520px] animate-pulse rounded-lg border border-border bg-card" />
+        <StateBlock size="full" title="正在加载 Agent 提示词" variant="loading" />
+      ) : loadError && !current ? (
+        <StateBlock
+          action={
+            <Button type="button" variant="outline" onClick={() => void refreshCurrent()}>
+              <RefreshCw aria-hidden="true" className="size-4" />
+              重试
+            </Button>
+          }
+          description={loadError}
+          size="full"
+          title={
+            qaConfigQuery.error instanceof ApiError && qaConfigQuery.error.isForbidden()
+              ? '没有读取 Agent 提示词的权限'
+              : '加载 Agent 提示词失败'
+          }
+          variant={
+            qaConfigQuery.error instanceof ApiError && qaConfigQuery.error.isForbidden()
+              ? 'forbidden'
+              : 'error'
+          }
+        />
       ) : (
         <section className="space-y-5 rounded-lg border border-border bg-card p-5">
           <div className="grid gap-3 md:grid-cols-4">
@@ -183,7 +186,9 @@ export function QASystemPromptPage() {
             </div>
             <div className="rounded-lg border border-border bg-background p-3">
               <div className="text-xs text-muted-foreground">创建人</div>
-              <div className="mt-1 text-sm font-medium text-foreground">契约未返回</div>
+              <div className="mt-1 text-sm font-medium text-foreground">
+                {current?.createdBy ?? '-'}
+              </div>
             </div>
             <div className="rounded-lg border border-border bg-background p-3">
               <div className="text-xs text-muted-foreground">生效状态</div>
@@ -219,7 +224,7 @@ export function QASystemPromptPage() {
             {canWrite && (
               <Button
                 type="button"
-                onClick={() => void publish()}
+                onClick={requestPublish}
                 disabled={!current || !isDirty || !validation.ok || createMutation.isPending}
               >
                 <Rocket aria-hidden="true" className="size-4" />
@@ -229,6 +234,25 @@ export function QASystemPromptPage() {
           </div>
         </section>
       )}
+
+      <ConfirmDialog
+        confirmLabel="发布新版本"
+        description={
+          <span className="space-y-2">
+            <span className="block">当前版本：{current ? current.versionNo : '-'}</span>
+            <span className="block">
+              影响范围：所有用户；发布后从下一次提问生效；正在生成的回答不受影响。
+            </span>
+          </span>
+        }
+        disabled={!current || !validation.ok}
+        onConfirm={() => void publish()}
+        onOpenChange={setConfirmOpen}
+        open={confirmOpen}
+        pending={createMutation.isPending}
+        pendingLabel="发布中..."
+        title="确认发布全局 Agent 系统提示词？"
+      />
     </div>
   )
 }

@@ -36,6 +36,7 @@ const currentConfig: QAConfigVersion = {
   },
   systemPrompt: '旧全局提示词',
   isActive: true,
+  createdBy: 'admin-user',
   createdAt: '2026-07-02T08:00:00Z',
 }
 
@@ -66,6 +67,7 @@ describe('QASystemPromptPage', () => {
     const editor = await screen.findByLabelText('全局 systemPrompt')
     expect(editor).toHaveValue('旧全局提示词')
     expect(editor).toHaveAttribute('readonly')
+    expect(screen.getByText('admin-user')).toBeVisible()
     expect(screen.getByText('当前账号只有读取权限，页面为只读模式。')).toBeVisible()
     expect(screen.queryByRole('button', { name: '发布新版本' })).not.toBeInTheDocument()
   })
@@ -112,7 +114,6 @@ describe('QASystemPromptPage', () => {
       return jsonResponse({ data: null, requestId: 'req-default' })
     })
     vi.stubGlobal('fetch', fetchMock)
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     renderWithProviders(<QASystemPromptPage />)
 
@@ -120,9 +121,10 @@ describe('QASystemPromptPage', () => {
     await userEvent.clear(editor)
     await userEvent.type(editor, '新提示词')
     await userEvent.click(screen.getByRole('button', { name: '发布新版本' }))
+    expect(screen.getByText('当前版本：4')).toBeVisible()
+    await userEvent.click(screen.getAllByRole('button', { name: '发布新版本' }).at(-1)!)
 
     await waitFor(() => expect(postBodies).toHaveLength(1))
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('当前版本：4'))
     expect(postBodies[0]).toMatchObject({
       defaultKnowledgeBaseIds: ['kb-main'],
       knowledgeBases: currentConfig.knowledgeBases,
@@ -164,7 +166,6 @@ describe('QASystemPromptPage', () => {
       return jsonResponse({ data: null, requestId: 'req-default' })
     })
     vi.stubGlobal('fetch', fetchMock)
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     renderWithProviders(<QASystemPromptPage />)
 
@@ -172,6 +173,7 @@ describe('QASystemPromptPage', () => {
     await userEvent.clear(editor)
     await userEvent.type(editor, '失败后保留的草稿')
     await userEvent.click(screen.getByRole('button', { name: '发布新版本' }))
+    await userEvent.click(screen.getAllByRole('button', { name: '发布新版本' }).at(-1)!)
 
     expect(await screen.findByText(/requestId: req-denied/)).toBeVisible()
     expect(editor).toHaveValue('失败后保留的草稿')
