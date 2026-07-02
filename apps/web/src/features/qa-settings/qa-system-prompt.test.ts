@@ -70,18 +70,10 @@ describe('qa-system-prompt helpers', () => {
       modelTimeoutSeconds: currentConfig.modelTimeoutSeconds,
       overallTimeoutSeconds: currentConfig.overallTimeoutSeconds,
       enabledToolNames: currentConfig.enabledToolNames,
-      llm: {
-        provider: 'ai-gateway',
-        profileId: 'profile-chat',
-        modelName: 'gpt-5.5',
-        timeoutSeconds: 60,
-        temperature: 0.2,
-        maxTokens: 4096,
-        activate: true,
-      },
       agent: currentConfig.agent,
       systemPrompt: '新的全局提示词',
       activate: true,
     })
+    expect(payload).not.toHaveProperty('llm')
   })
 })

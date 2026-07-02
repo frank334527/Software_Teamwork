@@ -42,17 +42,6 @@ export function buildSystemPromptPayload(
     modelTimeoutSeconds: current.modelTimeoutSeconds,
     overallTimeoutSeconds: current.overallTimeoutSeconds,
     enabledToolNames: current.enabledToolNames,
-    llm: current.llm
-      ? {
-          provider: current.llm.provider,
-          profileId: current.llm.profileId,
-          modelName: current.llm.modelName,
-          timeoutSeconds: current.llm.timeoutSeconds,
-          temperature: current.llm.temperature,
-          maxTokens: current.llm.maxTokens,
-          activate: current.llm.isActive,
-        }
-      : undefined,
     agent: current.agent,
     systemPrompt,
     activate: true,

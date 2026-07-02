@@ -5671,8 +5671,6 @@ components:
           type: array
           items:
             type: string
-        llm:
-          $ref: '#/components/schemas/CreateQALLMConfigVersionRequest'
         agent:
           $ref: '#/components/schemas/QAAgentConfig'
         systemPrompt:
