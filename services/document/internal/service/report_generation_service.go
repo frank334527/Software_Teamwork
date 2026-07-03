@@ -89,7 +89,8 @@ func (s *ReportGenerationService) ExecuteReportGeneration(ctx context.Context, p
 }
 
 func (s *ReportGenerationService) executeOutlineGeneration(ctx context.Context, reqCtx RequestContext, payload ReportGenerationExecutionPayload, job ReportJob, report Report) (ReportGenerationExecutionResult, error) {
-	if err := validateSupportedAIReportType(report.ReportType, "outline"); err != nil {
+	reportKind, err := resolveAIReportType(report.ReportType, "outline")
+	if err != nil {
 		return ReportGenerationExecutionResult{}, err
 	}
 	settings, err := s.safeSettings(ctx)
@@ -113,8 +114,8 @@ func (s *ReportGenerationService) executeOutlineGeneration(ctx context.Context, 
 		Model:     settings.LLM.Model,
 		ProfileID: settings.LLM.ProfileID,
 		Messages: []ChatMessage{
-			{Role: "system", Content: "Return strict JSON for a power-industry report outline. Do not include markdown."},
-			{Role: "user", Content: buildOutlinePrompt(report, structure, generationContext)},
+			{Role: "system", Content: buildOutlineSystemPrompt(reportKind.DisplayName)},
+			{Role: "user", Content: buildOutlinePrompt(report, structure, generationContext, reportKind)},
 		},
 	})
 	if err != nil {
@@ -164,7 +165,8 @@ func (s *ReportGenerationService) executeOutlineGeneration(ctx context.Context, 
 }
 
 func (s *ReportGenerationService) executeContentGeneration(ctx context.Context, reqCtx RequestContext, payload ReportGenerationExecutionPayload, job ReportJob, report Report) (ReportGenerationExecutionResult, error) {
-	if err := validateSupportedAIReportType(report.ReportType, "content"); err != nil {
+	reportKind, err := resolveAIReportType(report.ReportType, "content")
+	if err != nil {
 		return ReportGenerationExecutionResult{}, err
 	}
 	settings, err := s.safeSettings(ctx)
@@ -219,8 +221,8 @@ func (s *ReportGenerationService) executeContentGeneration(ctx context.Context, 
 			Model:     settings.LLM.Model,
 			ProfileID: settings.LLM.ProfileID,
 			Messages: []ChatMessage{
-				{Role: "system", Content: "Return strict JSON for one report section. Do not include markdown."},
-				{Role: "user", Content: buildSectionPrompt(report, section, generationContext)},
+				{Role: "system", Content: buildSectionSystemPrompt(reportKind.DisplayName)},
+				{Role: "user", Content: buildSectionPrompt(report, section, generationContext, sectionHasChildren(sections, section.ID), reportKind)},
 			},
 		})
 		if err != nil {
@@ -325,11 +327,22 @@ func (s *ReportGenerationService) markSectionGenerationFailed(ctx context.Contex
 	_, _ = s.repo.MarkReportSectionGenerationFailed(ctx, sectionID, jobID, s.clock())
 }
 
-func validateSupportedAIReportType(reportType, generationKind string) error {
-	if reportType != "summer_peak_inspection" {
-		return ValidationError(map[string]string{"reportType": fmt.Sprintf("unsupported report type for AI %s generation", generationKind)})
+type aiReportTypeMetadata struct {
+	DisplayName string
+}
+
+var supportedAIReportTypes = map[string]aiReportTypeMetadata{
+	"summer_peak_inspection": {DisplayName: "迎峰度夏检查报告"},
+	"coal_inventory_audit":   {DisplayName: "煤库存审计报告"},
+}
+
+func resolveAIReportType(reportType, generationKind string) (aiReportTypeMetadata, error) {
+	reportType = strings.TrimSpace(reportType)
+	metadata, ok := supportedAIReportTypes[reportType]
+	if !ok {
+		return aiReportTypeMetadata{}, ValidationError(map[string]string{"reportType": fmt.Sprintf("unsupported report type for AI %s generation", generationKind)})
 	}
-	return nil
+	return metadata, nil
 }
 
 func preserveManualEdits(job ReportJob) bool {
@@ -356,16 +369,18 @@ func (s *ReportGenerationService) safeSettings(ctx context.Context) (ReportSetti
 }
 
 type reportGenerationContext struct {
-	Requirements string
-	MaterialIDs  []string
-	Snippets     []ReportKnowledgeSnippet
+	Requirements         string
+	MaterialIDs          []string
+	SourceContentExcerpt string
+	Snippets             []ReportKnowledgeSnippet
 }
 
 func (s *ReportGenerationService) loadGenerationContext(ctx context.Context, reqCtx RequestContext, report Report, section ReportSection, job ReportJob) (reportGenerationContext, error) {
 	payload := jsonObject(job.RequestPayload)
 	result := reportGenerationContext{
-		Requirements: stringValue(payload["requirements"]),
-		MaterialIDs:  stringSliceValue(payload["materialIds"]),
+		Requirements:         stringValue(payload["requirements"]),
+		MaterialIDs:          stringSliceValue(payload["materialIds"]),
+		SourceContentExcerpt: sourceContentExcerptFromPayload(payload),
 	}
 	retrieval := mergedRetrievalOptions(payload)
 	knowledgeBaseIDs := stringSliceValue(retrieval["knowledgeBaseIds"])
@@ -448,27 +463,82 @@ func (s *ReportGenerationService) recordEvent(ctx context.Context, reportID, job
 	return err
 }
 
-func buildOutlinePrompt(report Report, structure ReportTemplateStructure, generationContext reportGenerationContext) string {
-	return fmt.Sprintf("reportType=%s topic=%s requirements=%s materialRefs=%s retrievedContext=%s templateOutlineSchema=%s output={\"sections\":[{\"title\":\"...\",\"children\":[]}]}",
-		report.ReportType,
-		report.Topic,
-		compactTextForPrompt(generationContext.Requirements, 1024),
-		strings.Join(generationContext.MaterialIDs, ","),
-		formatKnowledgeSnippets(generationContext.Snippets),
-		compactJSONForPrompt(structure.OutlineSchema),
-	)
+func buildOutlineSystemPrompt(reportDisplayName string) string {
+	return fmt.Sprintf(`你是一名中国电力行业报告撰写专家，正在生成%s的章节大纲。
+输出要求：
+1. 仅输出合法 JSON，不加任何 Markdown 代码块或额外说明。
+2. 格式：{"sections":[{"title":"章节标题","children":[{"title":"子节标题","children":[]}]}]}
+3. 标题使用中文，简洁专业，不含编号（编号由系统自动生成）。
+4. 根据报告主题和参考资料生成真实适用的章节结构，不使用泛泛的占位标题。`, reportDisplayName)
 }
 
-func buildSectionPrompt(report Report, section ReportSection, generationContext reportGenerationContext) string {
-	return fmt.Sprintf("reportType=%s topic=%s sectionNumber=%s sectionTitle=%s requirements=%s materialRefs=%s retrievedContext=%s output={\"content\":\"...\",\"tables\":[]}",
-		report.ReportType,
-		report.Topic,
-		section.Numbering,
-		section.Title,
-		compactTextForPrompt(generationContext.Requirements, 1024),
-		strings.Join(generationContext.MaterialIDs, ","),
-		formatKnowledgeSnippets(generationContext.Snippets),
-	)
+func buildSectionSystemPrompt(reportDisplayName string) string {
+	return fmt.Sprintf(`你是一名中国电力行业报告撰写专家，正在生成%s的某一章节内容。
+输出要求：
+1. 仅输出合法 JSON，不加任何 Markdown 代码块或额外说明。
+2. 格式：{"content":"正文段落（段落间用\n分隔）","tables":[{"headers":["列名1","列名2"],"rows":[["值","值"]],"footnote":"注释（可选，无则省略key）"}]}
+3. 使用正式中文，专业术语准确。
+4. 严禁使用 XX、N/A、待定、（数字）等任何占位符；必须填写具体的、合理的技术数据或描述，若无精确数据则给出合理估算值并注明"估算"。
+5. 表格数据必须与正文一致，不得与其他章节的数字相矛盾。
+6. 总结/结论章节应综合参考资料中已有的数据得出实质性结论，而非重复列举 XX 项。
+7. content 开头不得重复章节标题，直接进入正文内容。
+8. 若提示“本节含子章节”，则 content 只需写 1-2 段简短导言，具体数据和分析留给子章节；tables 为空数组。`, reportDisplayName)
+}
+
+func buildOutlinePrompt(report Report, structure ReportTemplateStructure, generationContext reportGenerationContext, reportKind aiReportTypeMetadata) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "报告类型：%s\n", report.ReportType)
+	fmt.Fprintf(&b, "报告名称：%s\n", reportKind.DisplayName)
+	fmt.Fprintf(&b, "报告主题：%s\n", report.Topic)
+	if req := compactTextForPrompt(generationContext.Requirements, 1024); req != "" {
+		fmt.Fprintf(&b, "额外要求：%s\n", req)
+	}
+	if len(generationContext.MaterialIDs) > 0 {
+		fmt.Fprintf(&b, "参考材料ID：%s\n", strings.Join(generationContext.MaterialIDs, ","))
+	}
+	if source := compactTextForPrompt(generationContext.SourceContentExcerpt, 12000); source != "" {
+		fmt.Fprintf(&b, "附件内容摘录：\n%s\n", source)
+	}
+	if snippets := formatKnowledgeSnippets(generationContext.Snippets); snippets != "" {
+		fmt.Fprintf(&b, "参考资料摘录：\n%s\n", snippets)
+	}
+	if schema := compactJSONForPrompt(structure.OutlineSchema); schema != "{}" {
+		fmt.Fprintf(&b, "大纲模板（仅供参考，可据实调整）：%s\n", schema)
+	}
+	b.WriteString(`请输出JSON大纲，sections数组中每项含title和children（可为空数组）。`)
+	return b.String()
+}
+
+func buildSectionPrompt(report Report, section ReportSection, generationContext reportGenerationContext, hasChildren bool, reportKind aiReportTypeMetadata) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "报告类型：%s\n", report.ReportType)
+	fmt.Fprintf(&b, "报告名称：%s\n", reportKind.DisplayName)
+	fmt.Fprintf(&b, "报告主题：%s\n", report.Topic)
+	sectionLabel := strings.TrimSpace(section.Numbering + " " + section.Title)
+	fmt.Fprintf(&b, "当前章节：%s\n", sectionLabel)
+	if hasChildren {
+		b.WriteString("提示：本节含子章节，content 只需写 1-2 段覆盖范围的导言，tables 为空数组。\n")
+	}
+	if req := compactTextForPrompt(generationContext.Requirements, 1024); req != "" {
+		fmt.Fprintf(&b, "额外要求：%s\n", req)
+	}
+	if source := compactTextForPrompt(generationContext.SourceContentExcerpt, 12000); source != "" {
+		fmt.Fprintf(&b, "附件内容摘录（请结合本节主题取用）：\n%s\n", source)
+	}
+	if snippets := formatKnowledgeSnippets(generationContext.Snippets); snippets != "" {
+		fmt.Fprintf(&b, "参考资料（请基于以下资料生成具体内容）：\n%s\n", snippets)
+	}
+	b.WriteString("请输出该章节的JSON内容，content为正文，tables为表格数组（无表格则为空数组）。")
+	return b.String()
+}
+
+func sectionHasChildren(sections []ReportSection, id string) bool {
+	for _, s := range sections {
+		if s.ParentID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func formatKnowledgeSnippets(snippets []ReportKnowledgeSnippet) string {
@@ -488,10 +558,11 @@ func formatKnowledgeSnippets(snippets []ReportKnowledgeSnippet) string {
 
 func compactTextForPrompt(text string, limit int) string {
 	text = strings.TrimSpace(text)
-	if limit <= 0 || len(text) <= limit {
+	if limit <= 0 || len([]byte(text)) <= limit {
 		return text
 	}
-	return text[:limit]
+	truncated, _ := truncateUTF8ByBytes(text, limit)
+	return truncated
 }
 
 func compactJSONForPrompt(raw json.RawMessage) string {
@@ -672,6 +743,27 @@ func mergedRetrievalOptions(payload map[string]any) map[string]any {
 		}
 	}
 	return result
+}
+
+func sourceContentExcerptFromPayload(payload map[string]any) string {
+	for _, value := range []any{payload["sourceContent"], mapValue(payload["options"], "sourceContent")} {
+		source, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if excerpt := stringValue(source["excerpt"]); excerpt != "" {
+			return excerpt
+		}
+	}
+	return ""
+}
+
+func mapValue(value any, key string) any {
+	mapped, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return mapped[key]
 }
 
 func stringValue(value any) string {

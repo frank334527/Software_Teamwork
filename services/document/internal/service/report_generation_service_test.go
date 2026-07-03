@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestReportGenerationServicePersistsAIOutlineAndSectionSkeletons(t *testing.T) {
@@ -68,6 +69,98 @@ func TestReportGenerationServicePersistsAIOutlineAndSectionSkeletons(t *testing.
 	if strings.Contains(chat.requests[0].Messages[0].Content, "sk-secret") {
 		t.Fatalf("prompt unexpectedly contains secret marker: %+v", chat.requests[0].Messages)
 	}
+}
+
+func TestReportGenerationServiceSupportsCoalInventoryAuditAIJobs(t *testing.T) {
+	t.Run("outline generation", func(t *testing.T) {
+		repo := newFakeReportGenerationRepository()
+		repo.reports["report-1"] = Report{
+			ID:         "report-1",
+			Name:       "煤库存审计报告",
+			ReportType: "coal_inventory_audit",
+			Topic:      "煤场库存核查",
+			CreatorID:  "user-1",
+			Status:     ReportStatusDraft,
+		}
+		repo.jobs["job-1"] = ReportJob{ID: "job-1", JobType: JobTypeOutlineGeneration, ReportID: "report-1"}
+		chat := &fakeGenerationChatClient{
+			responses: []ChatCompletionResponse{{
+				Content: `{"sections":[{"title":"审计范围与依据"},{"title":"库存账实核查"}]}`,
+			}},
+		}
+		svc := NewReportGenerationService(repo, chat)
+
+		result, err := svc.ExecuteReportGeneration(context.Background(), ReportGenerationExecutionPayload{
+			RequestID: "req-outline",
+			JobType:   JobTypeOutlineGeneration,
+			JobID:     "job-1",
+			UserID:    "user-1",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteReportGeneration() error = %v", err)
+		}
+		if result.Status != JobStatusSucceeded {
+			t.Fatalf("result status = %q, want succeeded", result.Status)
+		}
+		if len(chat.requests) != 1 {
+			t.Fatalf("chat request count = %d, want 1", len(chat.requests))
+		}
+		systemPrompt := chat.requests[0].Messages[0].Content
+		if !strings.Contains(systemPrompt, "煤库存审计报告") {
+			t.Fatalf("system prompt = %q, want coal inventory report label", systemPrompt)
+		}
+		if strings.Contains(systemPrompt, "迎峰度夏检查报告") {
+			t.Fatalf("system prompt still uses summer inspection label: %q", systemPrompt)
+		}
+	})
+
+	t.Run("content generation", func(t *testing.T) {
+		repo := newFakeReportGenerationRepository()
+		repo.reports["report-1"] = Report{
+			ID:         "report-1",
+			Name:       "煤库存审计报告",
+			ReportType: "coal_inventory_audit",
+			Topic:      "煤场库存核查",
+			CreatorID:  "user-1",
+			Status:     ReportStatusOutlineGenerated,
+		}
+		repo.jobs["job-1"] = ReportJob{ID: "job-1", JobType: JobTypeContentGeneration, ReportID: "report-1"}
+		repo.sections["section-1"] = ReportSection{
+			ID:               "section-1",
+			ReportID:         "report-1",
+			Title:            "库存账实核查",
+			SortOrder:        0,
+			Version:          1,
+			GenerationStatus: JobStatusPending,
+		}
+		chat := &fakeGenerationChatClient{
+			responses: []ChatCompletionResponse{{Content: `{"content":"煤场账实相符率估算为98.2%。","tables":[]}`}},
+		}
+		svc := NewReportGenerationService(repo, chat)
+
+		result, err := svc.ExecuteReportGeneration(context.Background(), ReportGenerationExecutionPayload{
+			RequestID: "req-content",
+			JobType:   JobTypeContentGeneration,
+			JobID:     "job-1",
+			UserID:    "user-1",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteReportGeneration() error = %v", err)
+		}
+		if result.Status != JobStatusSucceeded {
+			t.Fatalf("result status = %q, want succeeded", result.Status)
+		}
+		if len(chat.requests) != 1 {
+			t.Fatalf("chat request count = %d, want 1", len(chat.requests))
+		}
+		systemPrompt := chat.requests[0].Messages[0].Content
+		if !strings.Contains(systemPrompt, "煤库存审计报告") {
+			t.Fatalf("system prompt = %q, want coal inventory report label", systemPrompt)
+		}
+		if strings.Contains(systemPrompt, "迎峰度夏检查报告") {
+			t.Fatalf("system prompt still uses summer inspection label: %q", systemPrompt)
+		}
+	})
 }
 
 func TestReportGenerationServiceRollsBackOutlineAndSkeletonsWhenSkeletonCreationFails(t *testing.T) {
@@ -318,7 +411,7 @@ func TestReportGenerationServiceContentGenerationUsesCurrentOutlineSections(t *t
 	}
 }
 
-func TestReportGenerationServiceRejectsUnsupportedReportTypeForContentJobs(t *testing.T) {
+func TestReportGenerationServiceRejectsUnknownReportTypeForContentJobs(t *testing.T) {
 	tests := []struct {
 		name       string
 		jobType    JobType
@@ -335,9 +428,9 @@ func TestReportGenerationServiceRejectsUnsupportedReportTypeForContentJobs(t *te
 			repo := newFakeReportGenerationRepository()
 			repo.reports["report-1"] = Report{
 				ID:         "report-1",
-				Name:       "Coal inventory audit",
-				ReportType: "coal_inventory_audit",
-				Topic:      "coal storage",
+				Name:       "Custom unsupported report",
+				ReportType: "custom_report",
+				Topic:      "custom topic",
 				CreatorID:  "user-1",
 				Status:     ReportStatusOutlineGenerated,
 			}
@@ -924,6 +1017,98 @@ func TestReportGenerationServiceRetrievesKnowledgeContextForOutline(t *testing.T
 	}
 	if strings.Contains(prompt, "chunk-1") || strings.Contains(prompt, "doc-1") {
 		t.Fatalf("prompt leaked internal knowledge IDs: %s", prompt)
+	}
+}
+
+func TestReportGenerationServiceUsesSourceContentExcerptForOutline(t *testing.T) {
+	repo := newFakeReportGenerationRepository()
+	repo.reports["report-1"] = Report{
+		ID:         "report-1",
+		Name:       "Attachment report",
+		ReportType: "summer_peak_inspection",
+		TemplateID: "template-1",
+		Topic:      "attachment summary",
+		CreatorID:  "user-1",
+		Status:     ReportStatusDraft,
+	}
+	repo.jobs["job-1"] = ReportJob{
+		ID:       "job-1",
+		JobType:  JobTypeOutlineGeneration,
+		ReportID: "report-1",
+		RequestPayload: map[string]any{
+			"options": map[string]any{
+				"sourceContent": map[string]any{
+					"excerpt":        "附件显示主变压器在夏峰负荷下出现温升异常。",
+					"originalLength": float64(50000),
+					"excerptLength":  float64(72),
+					"truncated":      true,
+				},
+			},
+		},
+	}
+	repo.templateStructures["template-1"] = ReportTemplateStructure{OutlineSchema: []byte(`{"sections":["overview"]}`)}
+	chat := &fakeGenerationChatClient{
+		responses: []ChatCompletionResponse{{Content: `{"sections":[{"title":"Overview"}]}`}},
+	}
+	svc := NewReportGenerationService(repo, chat)
+
+	if _, err := svc.ExecuteReportGeneration(context.Background(), ReportGenerationExecutionPayload{
+		RequestID: "req-outline",
+		JobType:   JobTypeOutlineGeneration,
+		JobID:     "job-1",
+		UserID:    "user-1",
+	}); err != nil {
+		t.Fatalf("ExecuteReportGeneration() error = %v", err)
+	}
+	prompt := chat.requests[0].Messages[1].Content
+	if !strings.Contains(prompt, "附件显示主变压器在夏峰负荷下出现温升异常") {
+		t.Fatalf("prompt did not include source content excerpt: %s", prompt)
+	}
+	if strings.Contains(prompt, "50000") || strings.Contains(prompt, "originalLength") {
+		t.Fatalf("prompt leaked source content metadata: %s", prompt)
+	}
+}
+
+func TestReportGenerationServiceKeepsSourceContentPromptUTF8Valid(t *testing.T) {
+	repo := newFakeReportGenerationRepository()
+	repo.reports["report-1"] = Report{
+		ID:         "report-1",
+		Name:       "Attachment report",
+		ReportType: "summer_peak_inspection",
+		TemplateID: "template-1",
+		Topic:      "attachment summary",
+		CreatorID:  "user-1",
+		Status:     ReportStatusDraft,
+	}
+	repo.jobs["job-1"] = ReportJob{
+		ID:       "job-1",
+		JobType:  JobTypeOutlineGeneration,
+		ReportID: "report-1",
+		RequestPayload: map[string]any{
+			"options": map[string]any{
+				"sourceContent": map[string]any{
+					"excerpt": strings.Repeat("负A荷", 2000),
+				},
+			},
+		},
+	}
+	repo.templateStructures["template-1"] = ReportTemplateStructure{OutlineSchema: []byte(`{"sections":["overview"]}`)}
+	chat := &fakeGenerationChatClient{
+		responses: []ChatCompletionResponse{{Content: `{"sections":[{"title":"Overview"}]}`}},
+	}
+	svc := NewReportGenerationService(repo, chat)
+
+	if _, err := svc.ExecuteReportGeneration(context.Background(), ReportGenerationExecutionPayload{
+		RequestID: "req-outline",
+		JobType:   JobTypeOutlineGeneration,
+		JobID:     "job-1",
+		UserID:    "user-1",
+	}); err != nil {
+		t.Fatalf("ExecuteReportGeneration() error = %v", err)
+	}
+	prompt := chat.requests[0].Messages[1].Content
+	if !utf8.ValidString(prompt) {
+		t.Fatalf("prompt contains invalid UTF-8 after source excerpt truncation")
 	}
 }
 

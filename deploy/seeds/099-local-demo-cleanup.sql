@@ -1,4 +1,11 @@
+-- Local integration contract: optional cleanup companion for local demo seed
+-- data; keep it in sync with deploy/seeds/001-local-demo-seed.sql.
 \connect qa_system
+
+DELETE FROM mcp_servers
+WHERE id = '33333333-3333-4333-8333-333333333601'::uuid
+  AND alias = 'document'
+  AND created_by_user_id = 'local-seed';
 
 DELETE FROM citations
 WHERE message_id IN (
@@ -138,22 +145,26 @@ WHERE id = 'kb_local_demo'
 \connect auth_system
 
 DELETE FROM session_revocations
-WHERE user_id = 'usr_local_admin';
+WHERE user_id IN ('usr_local_admin', 'usr_local_super_admin');
 
 DELETE FROM auth_security_events
-WHERE user_id = 'usr_local_admin'
-   OR username_snapshot = 'admin';
+WHERE user_id IN ('usr_local_admin', 'usr_local_super_admin')
+   OR username_snapshot IN ('admin', 'superadmin');
 
 DELETE FROM auth_sessions
-WHERE user_id = 'usr_local_admin';
+WHERE user_id IN ('usr_local_admin', 'usr_local_super_admin');
 
 DELETE FROM user_roles
-WHERE user_id = 'usr_local_admin';
+WHERE user_id IN ('usr_local_admin', 'usr_local_super_admin');
 
 DELETE FROM auth_credentials
-WHERE id = 'cred_local_admin_password'
-   OR user_id = 'usr_local_admin';
+WHERE id IN ('cred_local_admin_password', 'cred_local_super_admin_password')
+   OR user_id IN ('usr_local_admin', 'usr_local_super_admin');
 
 DELETE FROM auth_users
 WHERE id = 'usr_local_admin'
   AND username = 'admin';
+
+DELETE FROM auth_users
+WHERE id = 'usr_local_super_admin'
+  AND username = 'superadmin';

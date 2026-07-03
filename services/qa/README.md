@@ -109,7 +109,7 @@ go test ./internal/platform/modelclient -run '^TestAIGatewaySmoke$' -count=1 -v
 
 `AI_GATEWAY_TOKEN` may be omitted when `INTERNAL_SERVICE_TOKEN` is set. Optional
 `AI_GATEWAY_TIMEOUT` uses Go duration syntax and defaults to `60s`. A successful
-run reports these subtests. When using the root Compose SQL seed, the initial
+run reports these subtests. When using the root local SQL seed, the initial
 pair is `AI_GATEWAY_PROFILE_ID=default-chat` and
 `MODEL_ID=local-placeholder-chat`; that placeholder profile still needs a
 reachable compatible provider/model before the positive call can succeed.
@@ -148,6 +148,17 @@ and `MCP_SERVER_TOKEN_HEADER`. `MCP_SERVER_ALIAS` controls the model-facing tool
 prefix for the environment bootstrap server and defaults to `env_default`; use
 `document` for the Document MCP server so report tools are exposed as
 `document__<tool>`.
+
+Knowledge retrieval has a dedicated optional MCP connection independent of the
+admin-configured MCP list. Set `KNOWLEDGE_MCP_URL` (normally
+`http://localhost:8093/mcp`), `KNOWLEDGE_MCP_TOKEN`,
+`KNOWLEDGE_MCP_TOKEN_HEADER`, `KNOWLEDGE_MCP_ALIAS`, and
+`KNOWLEDGE_MCP_TIMEOUT`. At runtime QA discovers all four Knowledge tools and
+exposes the required read tools as `knowledge__search`,
+`knowledge__list_documents`, `knowledge__get_document`, and
+`knowledge__get_chunk`. If connection or tool
+discovery fails, QA keeps the legacy `search_knowledge` HTTP adapter available;
+the MCP token falls back to `INTERNAL_SERVICE_TOKEN` when omitted.
 
 ### Document report tools
 
@@ -190,10 +201,11 @@ $env:AGENT_MAX_ITERATIONS = "8"
 $env:QA_DOCUMENT_MCP_SMOKE = "1"
 ```
 
-In root Compose, QA uses the container URL `http://document:8085/mcp` and the
-same local `INTERNAL_SERVICE_TOKEN` placeholder by default. Host-run smoke tests
-use `http://127.0.0.1:8085/mcp` because the Document service port is published
-to the host.
+In the standard local path, both QA and Document run on the host, so QA uses
+`http://localhost:8085/mcp`. Root Compose starts infrastructure only. The
+database seed stores non-secret MCP metadata; QA merges the local
+`MCP_SERVER_TOKEN` into the matching `document` alias when no encrypted token
+is stored.
 
 `MCP_TOOL_TIMEOUT` bounds each Document tool call. QA does not perform an
 unbounded status-poll loop inside the tool adapter; if the model calls
@@ -202,11 +214,11 @@ bounded by `AGENT_MAX_ITERATIONS` and the per-tool timeout. Full QA -> Document
 worker -> Gateway download smoke should stay env-gated with
 `QA_DOCUMENT_MCP_SMOKE=1` so ordinary CI does not require a live Document worker.
 
-Run the env-gated smoke from the QA service after starting the root Compose
-stack with Document, File, Redis, PostgreSQL, Gateway, and the local seed data:
+Run the env-gated smoke from the QA service after `dev-up.sh` starts
+infrastructure/migrations/seeds and `run-backend.sh` starts host-run services:
 
 ```powershell
-cd D:\软件工称大作业\Software_Teamwork\services\qa
+cd D:\PROJECTS\Software_Teamwork\services\qa
 $env:QA_DOCUMENT_MCP_SMOKE = "1"
 $env:MCP_TRANSPORT = "streamable_http"
 $env:MCP_SERVER_ALIAS = "document"
@@ -232,6 +244,10 @@ report/job/file identifiers, status, safe progress, and the public download
 path `/api/v1/report-files/{reportFileId}/content` when `fileStatus=succeeded`.
 Raw prompts, provider errors, internal URLs, object keys, File internal IDs,
 service tokens, and full report body text are stripped.
+
+The exact schemas for all nine current Document tools, shared result structure,
+runtime registration precedence, and Agent workflow are documented in
+[`../../docs/services/document/docs/mcp-tools.md`](../../docs/services/document/docs/mcp-tools.md).
 
 ### MCP local integration
 

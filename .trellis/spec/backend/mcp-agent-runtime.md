@@ -55,7 +55,9 @@ Environment keys:
 | `MCP_SERVER_COMMAND` | no | Reserved for package-owned stdio tests; runtime configuration must not launch local commands. |
 | `MCP_SERVER_ARGS_JSON` | no | Reserved for package-owned stdio tests; runtime MCP servers use Streamable HTTP. |
 | `MCP_SERVER_URL` | for HTTP | Absolute HTTP(S) Streamable HTTP endpoint. |
+| `MCP_SERVER_ALIAS` | for HTTP | Stable `[a-z0-9_]{2,32}` namespace; model-facing names are `<alias>__<server-tool>`. |
 | `MCP_SERVER_TOKEN` | no | Remote MCP credential; never log or persist. |
+| `MCP_SERVER_TOKEN_HEADER` | no | Credential header, default `Authorization`; Authorization tokens are sent as Bearer. |
 | `MCP_TOOL_TIMEOUT` | no | Positive Go duration, default `30s`. |
 | `AGENT_MAX_ITERATIONS` | no | Positive integer, default `8`. |
 | `AGENT_WORKDIR` | no | Existing workspace root for built-in file/command tools; defaults to process cwd. |
@@ -76,6 +78,13 @@ MCP CallToolResult
   -> role=tool, tool_call_id=<model call id>, content=<bounded result>
 ```
 
+Runtime MCP configuration merge:
+
+```text
+database mcp_servers metadata + matching environment bootstrap credential
+  -> RuntimeMCPConfig[]
+```
+
 Built-in Function Calling tools:
 
 ```text
@@ -89,6 +98,8 @@ bash(command, timeout_seconds?)  # only when explicitly enabled
 - Stdio server stdout contains MCP JSON-RPC only; diagnostics use stderr.
 - The loop executes every tool call in a model turn, appends correlated tool results, and calls the model again.
 - Built-in and MCP tools are merged behind one `ToolClient`; duplicate names fail discovery instead of silently shadowing another tool.
+- Database MCP rows are the administrative authority. For a matching alias, an encrypted database token wins; when the enabled row has no token, use the environment bootstrap token. A disabled matching row suppresses bootstrap. When only unrelated database aliases exist, append bootstrap instead of dropping it.
+- Local seeds may store alias, endpoint, header, timeout, and enabled state, but must not persist plaintext or environment-specific encrypted service tokens.
 - File tool paths are relative to `AGENT_WORKDIR` and checked after symlink resolution. File content must be UTF-8 and bounded.
 - The command tool runs inside `AGENT_WORKDIR`, has bounded output and timeout, and is disabled by default. It only permits path-free diagnostic commands; file access must use the workspace-bounded file tools.
 - Tool failures become sanitized tool-result messages so the model can recover. Raw downstream errors, prompts, credentials, and internal payloads are not returned to the model or frontend.
@@ -101,6 +112,9 @@ bash(command, timeout_seconds?)  # only when explicitly enabled
 | Missing model URL/key/model | Startup configuration error. |
 | Stdio transport in runtime configuration | Startup configuration error; use `streamable_http`. |
 | HTTP without absolute endpoint | Startup configuration error. |
+| Matching enabled database alias without stored token | Merge the matching environment token; retain database endpoint/timeout metadata. |
+| Matching disabled database alias | Keep disabled; do not append or re-enable environment bootstrap. |
+| Database contains only unrelated MCP aliases | Keep those enabled rows and append environment bootstrap. |
 | Invalid `MCP_SERVER_ARGS_JSON` | Startup configuration error; never invoke a shell. |
 | Missing or invalid `AGENT_WORKDIR` | Startup configuration error. |
 | Absolute, traversal, or escaping-symlink file path | Return sanitized `invalid_path`; do not access it. |
@@ -118,7 +132,9 @@ bash(command, timeout_seconds?)  # only when explicitly enabled
 ### 5. Good/Base/Bad Cases
 
 - Good: expose workspace-bounded local tools through Function Calling, optionally merge official-SDK MCP tools, and correlate results by `tool_call_id`.
+- Good: seed non-secret remote MCP metadata and inject its credential from the host environment by matching alias.
 - Base: run with `MCP_TRANSPORT=disabled` and use read/write/edit only.
+- Bad: treat the existence of any database MCP row as a reason to discard an unrelated environment bootstrap, or let bootstrap re-enable an explicitly disabled alias.
 - Bad: parse JSON-RPC manually inside the Agent Loop, invoke commands through a shell, print logs to MCP stdout, or send tokens/tool arguments to logs.
 
 ### 6. Tests Required
@@ -130,6 +146,7 @@ bash(command, timeout_seconds?)  # only when explicitly enabled
 - Composite-tool tests: merge and route local/MCP providers; reject duplicate names.
 - Model client contract test: Authorization header, `tools`, `tool_choice`, assistant `tool_calls`, and sanitized non-2xx handling.
 - Configuration tests: transport-specific required fields, JSON argument parsing, URL validation, and defaults.
+- Runtime configuration tests: matching token fallback, stored-token precedence, disabled-alias precedence, and bootstrap append with unrelated database aliases.
 - Service checks: `gofmt -l .`, `go vet ./...`, `go test ./...`, and `go build ./cmd/agent`.
 
 ### 7. Wrong vs Correct
@@ -286,4 +303,104 @@ QA persists user + generating assistant messages
 QA Agent -> model Function Calling -> local/MCP tool
 QA emits and persists safe SSE progress + answer delta + tool summaries
 QA persists final message + displayable steps; Gateway preserves envelopes
+```
+
+## Scenario: Knowledge MCP Server
+
+### 1. Scope / Trigger
+
+- Trigger: changing `services/knowledge/internal/mcp`, MCP tool schemas, adapter bridge, or AI Gateway wiring for Knowledge-owned tools.
+- Knowledge owns the **MCP Server** (tool implementation). QA and other products are **MCP Clients** only.
+- MCP must not call `knowledge-runtime` directly; all tools go through the existing adapter handler layer (in-process `Bridge`).
+
+### 2. Signatures
+
+```text
+MCP server name: knowledge-mcp
+Transport: Streamable HTTP (official go-sdk)
+Listener env: KNOWLEDGE_MCP_ADDR (optional; omit to disable MCP)
+```
+
+v1 tools (14):
+
+```text
+search_knowledge
+answer_from_knowledge
+list_knowledge_bases | get_knowledge_base | create_knowledge_base | update_knowledge_base | delete_knowledge_base
+list_documents | get_document | create_document | update_document | delete_document
+list_document_chunks | get_document_content
+```
+
+Bridge (in-process, no loopback HTTP):
+
+```go
+Bridge.Do(ctx, caller, method, path, body []byte) (status int, body []byte, headers http.Header, err error)
+Bridge.DoJSON / DoGET / DoMultipart
+```
+
+### 3. Contracts
+
+Environment keys:
+
+| Key | Required | Contract |
+| --- | --- | --- |
+| `KNOWLEDGE_MCP_ADDR` | no | e.g. `:8084`; empty disables MCP listener |
+| `KNOWLEDGE_HTTP_ADDR` | yes | Adapter REST, default `:8083` |
+| `KNOWLEDGE_AI_GATEWAY_URL` | for `answer_from_knowledge` | Absolute HTTP(S) base; joins `/internal/v1/chat/completions` |
+| `KNOWLEDGE_AI_GATEWAY_SERVICE_TOKEN` | no | Falls back to `INTERNAL_SERVICE_TOKEN` |
+
+MCP session → adapter headers:
+
+| Header | Source |
+| --- | --- |
+| `X-User-Id` | MCP HTTP request |
+| `X-Request-Id` | MCP HTTP request or generated |
+| `X-User-Roles` / `X-User-Permissions` | optional |
+
+Tool contracts:
+
+- `search_knowledge` → `POST /internal/v1/knowledge-queries` (retrieval only, no LLM).
+- `answer_from_knowledge` → retrieval + AI Gateway chat with numbered citations in prompt; returns `{ answer, citations[], retrieval }`.
+- CRUD tools → matching `/internal/v1/knowledge-bases*` and `/internal/v1/documents*` adapter routes.
+- `create_document` → decode `fileContentBase64`, `Bridge.DoMultipart` to upload route.
+
+Do **not** expose RAGFlow upstream MCP (`--enable-mcpserver`) as the product tool surface.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+| --- | --- |
+| `KNOWLEDGE_MCP_ADDR` unset | MCP listener not started; REST adapter unaffected |
+| `answer_from_knowledge` without AI Gateway URL | Tool error: gateway not configured |
+| Missing `X-User-Id` on MCP HTTP | Defaults to `mcp_anonymous` + read permission (tests); production clients must send real user id |
+| Invalid base64 in `create_document` | Tool validation error |
+| Adapter/vendor failure | Propagate adapter error message to MCP tool result |
+
+### 5. Good/Base/Bad Cases
+
+- Good: QA calls `search_knowledge` via Streamable HTTP; Knowledge forwards to adapter; citations returned for QA snapshot projection.
+- Base: MCP disabled; Gateway REST on `:8083` only.
+- Bad: QA calls RAGFlow runtime MCP on `:9382`; duplicate auth models; bypass adapter contract.
+
+### 6. Tests Required
+
+- `internal/mcp`: `tools/list` returns 14 tools; `search_knowledge` with fake vendor; `answer_from_knowledge` with fake vendor + fake AI Gateway; KB create/list; `create_document` multipart upload.
+- `internal/aigateway`: chat client request headers and response decode.
+- Final: `go test ./...` in `services/knowledge`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+Document service -> knowledge-runtime :9380 /api/v1/datasets/search
+QA -> RAGFlow MCP with API key auth
+```
+
+#### Correct
+
+```text
+QA MCP Client -> KNOWLEDGE_MCP_ADDR (Streamable HTTP)
+Knowledge MCP -> Bridge -> adapter handlers -> vendorclient -> knowledge-runtime
+answer_from_knowledge -> Bridge retrieval -> KNOWLEDGE_AI_GATEWAY_URL chat
 ```

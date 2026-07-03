@@ -38,13 +38,13 @@ Gateway 后续实现必须遵循 [技术选型基线](../../architecture/technol
 | 能力 | 说明 |
 | --- | --- |
 | Public API surface | 暴露前端、管理端、其他后端模块和工具调用方使用的 `/api/v1/**` HTTP API。 |
-| Routing | 将已确定的公开请求转发到 `auth`、`file`、`knowledge`、`qa`、`document`、`ai-gateway` 等内部服务；未定下游服务只保留缺失占位。 |
+| Routing | 将已确定的公开请求转发到 `auth`、`file`、`knowledge`、`qa`、`document`、`ai-gateway` 等内部服务；active contract 可能仍由 owner service 分阶段实现，端到端可用性以 implementation 文档和 smoke 记录为准。 |
 | Auth context | 基于 Redis 会话缓存读取用户身份，并向下游传递用户、角色、权限和 request id。 |
 | Session cache | 用户或会话创建成功后缓存 auth 返回的会话身份信息，后续请求优先从 Redis 获取会话上下文。 |
 | Response contract | 对前端保持统一成功响应、分页响应和错误响应结构。 |
 | Request correlation | 生成或透传 `X-Request-Id`，并要求下游服务保留该 request id。 |
-| Admin runtime configuration entrypoint | 暴露模型 profile 和文档解析器配置的管理入口；模型配置转发给 `ai-gateway`，解析器配置转发给 `knowledge`。 |
-| Cross-service aggregation | 仅在前后端契约明确后提供聚合读接口；本轮管理后台概览暂标缺失。 |
+| Admin runtime configuration entrypoint | 暴露模型 profile、文档解析器配置和用户管理的管理入口；模型配置转发给 `ai-gateway`，解析器配置转发给 `knowledge`，用户管理转发给 `auth`。 |
+| Cross-service aggregation | 仅在前后端契约明确后提供聚合读接口；管理后台概览和指标已经是 active contracts，但当前 Gateway route 仍按稳定 `not_implemented` 占位，聚合实现和运行证据待补。 |
 | Streaming entrypoint | 问答通过 `POST /api/v1/qa-sessions/{sessionId}/messages` 提供 `text/event-stream` 响应，并通过 `/api/v1/qa-sessions/{sessionId}/events` 提供短期事件回放；报告生成当前提供事件列表资源，后续如需 SSE 需先补 OpenAPI 契约。 |
 | Edge policy | 集中处理 CORS、基础请求头、请求大小原则、健康检查和公开 API 命名。 |
 
@@ -84,16 +84,19 @@ Gateway 后续实现必须遵循 [技术选型基线](../../architecture/technol
 
 | Owner | Gateway 公开资源范围 |
 | --- | --- |
-| `gateway` | 健康检查和就绪检查。 |
-| `auth` | 用户、会话和当前用户身份。 |
+| `gateway` | 健康检查、就绪检查、管理后台概览和跨服务指标聚合入口；后两者当前仍按稳定 `not_implemented` 占位。 |
+| `auth` | 用户、会话、当前用户身份、当前用户资料、必需改密和管理员用户管理。 |
 | `knowledge` | 知识库、知识库文档、文档详情、文档切片、原始文件内容、知识查询和管理员解析器配置。 |
 | `document` | 报告类型、模板、素材、报告记录、大纲、章节、任务、事件、生成文件、统计、操作日志和报告设置。 |
-| `qa` | QA 会话、消息、回答运行、脱敏工具调用摘要、引用、配置版本、连接测试、检索体验测试和 QA 指标。 |
+| `qa` | QA 会话、消息、会话附件、回答运行、脱敏工具调用摘要、引用、配置版本、连接测试、检索体验测试和 QA 指标。 |
 | `ai-gateway` | 管理端模型 profile 配置；Gateway 只做管理员鉴权、响应归一化和密钥脱敏转发，不保存 API key。 |
 
-仍暂缺的下游接口：
+Active contract 与实现状态：
 
-| 无。所有计划内公开 API 已转为 active paths。 |
+| 状态 | 说明 |
+| --- | --- |
+| 缺失公开契约 | 无。当前计划内公开 API 已转为 active paths；Gateway OpenAPI 只保留 `status: resolved` 的 `x-missing-contracts` 记录，`placeholderOperations` 为空。 |
+| 已稳定但未完整实现 | `GET /api/v1/admin/overview` 和 `GET /api/v1/admin/metrics` 仍按稳定 `not_implemented` 占位；真实 owner service、provider、worker 或跨服务 smoke 以 implementation 文档和运行记录为准。 |
 
 当某个 endpoint 涉及两个服务时，文档必须显式标注 workflow owner。默认规则是：拥有核心业务状态的服务拥有流程，gateway 只做入口和上下文传递。若流程需要模型能力，领域服务应通过 [AI Gateway 服务接口文档](../ai-gateway/README.md) 和 [AI Gateway OpenAPI 契约](../ai-gateway/api/internal.openapi.yaml) 调用内部模型接口，不能让 public gateway 直接拼 prompt 或直连 provider。
 
@@ -151,6 +154,21 @@ Gateway 负责转发用户创建和会话创建请求，成功后把 auth 返回
 
 Auth service 负责创建用户、校验凭证、维护角色权限、签发会话身份和记录安全事件。Gateway 必须只把 `data.session.accessToken` 返回给前端，不得把 Redis key、token hash、内部 auth URL 或 session secret 暴露给前端。
 
+公开 `POST /api/v1/users` 保持自助注册语义：不要求管理员认证，创建默认
+`standard` 用户并返回会话，不触发首次强制改密。管理员创建用户使用
+`POST /api/v1/admin/users`，要求管理员认证，不返回被创建用户的 session，并由 Auth
+设置 `mustChangePassword=true`。
+
+Gateway 还暴露 Auth 拥有的当前用户资料和必需改密资源。`/api/v1/users/me/profile`
+只允许用户自助编辑 `displayName`、`email`、`phone`；`/api/v1/users/me/password-changes`
+用于提交当前临时密码、新密码和确认值。Gateway 负责公开路由、envelope 和认证上下文传递，
+并使用 `GATEWAY_AUTH_ADMIN_SERVICE_TOKEN` 调用 Auth 自助写接口；Auth 负责校验当前密码、更新密码哈希和清除 `mustChangePassword`。
+
+管理员用户管理路由 `/api/v1/admin/users` 由 Gateway 做粗粒度管理员入口校验并转发给 Auth。
+Auth 是最终权限裁判：`admin` 只能管理 `standard`，`super_admin`
+可管理 `standard` 与 `admin`，普通 `system:admin` 业务权限不会提升用户管理层级，任何公开 UI/API 都不能管理 `super_admin`。用户禁用、
+密码重置和角色变化后，Gateway 必须配合 Auth 撤销或刷新受影响 Redis 会话缓存，避免旧权限快照继续可用。
+
 ## Gateway Knowledge 行为
 
 Gateway 对前端暴露 knowledge 拥有的知识库、知识库文档、文档内容、文档切片和检索查询资源，精确接口清单以 [`api/public.openapi.yaml`](api/public.openapi.yaml) 与 [active API owner map](docs/active-api-owner-map.md) 为准。Gateway 只负责鉴权上下文传递、路由和响应归一化，不执行解析、切片、embedding、Qdrant 检索或重排序。
@@ -161,9 +179,9 @@ Gateway 对前端暴露 knowledge 拥有的知识库、知识库文档、文档�
 
 ## Gateway QA 行为
 
-Gateway 对前端暴露 `qa` 拥有的会话、消息、回答运行、工具调用摘要、引用、配置版本、检索体验测试和统计资源，精确接口清单以 [`api/public.openapi.yaml`](api/public.openapi.yaml) 与 [active API owner map](docs/active-api-owner-map.md) 为准。
+Gateway 对前端暴露 `qa` 拥有的会话、消息、会话附件、回答运行、工具调用摘要、引用、配置版本、检索体验测试和统计资源，精确接口清单以 [`api/public.openapi.yaml`](api/public.openapi.yaml) 与 [active API owner map](docs/active-api-owner-map.md) 为准。
 
-Gateway 只负责认证上下文、统一 envelope、SSE 转发和错误归一化；`qa` 服务拥有会话、消息、回答运行、Agent/ReAct 循环、MCP 工具编排、引用快照、配置版本、检索体验测试和问答统计。SSE 事件语义见 [QA 服务文档](../qa/README.md) 与 [前后端集成契约](../../architecture/frontend-backend-contract.md)。SSE 事件、工具摘要和错误响应不得包含完整工具参数、MCP 原始响应、内部 URL、原始文档全文、prompt、provider 原始错误或存储 object key。
+Gateway 只负责认证上下文、统一 envelope、SSE 转发和错误归一化；`qa` 服务拥有会话、消息、会话附件、回答运行、Agent/ReAct 循环、MCP 工具编排、引用快照、配置版本、检索体验测试和问答统计。QA/LLM settings 端点必须具备 `qa:settings:read` / `qa:settings:write` 或等价管理权限，是唯一可返回完整 `systemPrompt` 的公开面。SSE 事件语义见 [QA 服务文档](../qa/README.md) 与 [前后端集成契约](../../architecture/frontend-backend-contract.md)。普通 QA 会话、SSE 事件、工具摘要、错误响应、日志和指标不得包含完整工具参数、MCP 原始响应、内部 URL、原始文档全文、完整提示词、provider 原始错误或存储 object key。
 
 ## 响应约定
 
@@ -171,9 +189,11 @@ Gateway 负责对前端保持统一成功响应、分页响应和错误响应结
 
 Gateway 可透传或映射 owner service 的服务特有错误码，但任何稳定公开错误都必须先进入 [`api/public.openapi.yaml`](api/public.openapi.yaml)。
 
-## 缺失下游接口
+## Active contract 与实现状态
 
 `GET /api/v1/admin/overview` 和 `GET /api/v1/admin/metrics` 已转为 active contracts，具体 schema 以 Gateway OpenAPI 为准。Gateway 负责轻量聚合，各领域服务提供指标来源。路由注册由单独后端 issue 追踪。
+
+当前 Gateway OpenAPI 只保留 `status: resolved` 的 `x-missing-contracts` 记录，`placeholderOperations` 为空；新增公开资源必须先进入 Gateway OpenAPI、owner map 和对应服务文档。active path 只表示公开 method/path/schema 已稳定，不表示真实 owner service、provider、worker 或跨服务 smoke 已全部通过。
 
 AI Gateway 的内部模型调用接口已经有独立契约：[`docs/services/ai-gateway/api/internal.openapi.yaml`](../ai-gateway/api/internal.openapi.yaml)。该契约不属于前端可调用的 gateway OpenAPI，也不应生成到前端 API client。前端需要管理运行时模型配置时，只能使用 gateway OpenAPI 中的 `/api/v1/admin/model-profiles` 资源；gateway 再调用 AI Gateway 内部 `/internal/v1/model-profiles`。
 

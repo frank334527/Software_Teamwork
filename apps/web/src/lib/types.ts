@@ -19,6 +19,16 @@ export type PageInfo = components['schemas']['PageInfo']
 
 // ── Auth ──
 export type UserSummary = components['schemas']['UserSummary']
+export type UserStatus = components['schemas']['UserStatus']
+export type ManagedUserRole = components['schemas']['ManagedUserRole']
+export type UserProfile = components['schemas']['UserProfile']
+export type UpdateUserProfileRequest = components['schemas']['UpdateUserProfileRequest']
+export type CreatePasswordChangeRequest = components['schemas']['CreatePasswordChangeRequest']
+export type AdminUser = components['schemas']['AdminUser']
+export type CreateAdminUserRequest = components['schemas']['CreateAdminUserRequest']
+export type UpdateAdminUserRequest = components['schemas']['UpdateAdminUserRequest']
+export type CreateAdminPasswordResetRequest =
+  components['schemas']['CreateAdminPasswordResetRequest']
 export type SessionSummary = components['schemas']['SessionSummary']
 export type CreateUserRequest = components['schemas']['CreateUserRequest']
 export type CreateSessionRequest = components['schemas']['CreateSessionRequest']
@@ -59,6 +69,12 @@ export type QAAgentToolCall = components['schemas']['QAAgentToolCall']
 // ── QA SSE Events ──
 export type QASseEventType = components['schemas']['QASseEventType']
 export type QASseEvent = components['schemas']['QASseEvent']
+
+// ── QA Session Attachments ──
+export type SessionAttachmentStatus = components['schemas']['SessionAttachmentStatus']
+export type SessionAttachmentSummary = components['schemas']['SessionAttachmentSummary']
+/** @deprecated Use `SessionAttachmentSummary` instead. */
+export type QASessionAttachment = SessionAttachmentSummary
 
 // ── QA Report Artifacts ──
 export type QAReportArtifact = components['schemas']['QAReportArtifact']

@@ -17,14 +17,14 @@ services/auth/
 services/file/
 services/qa/
 services/knowledge/
+services/knowledge-runtime/
 services/document/
 services/ai-gateway/
-services/parser/
 deploy/docker-compose.yml
 ```
 
-Current Docker target: local infrastructure Compose only. The repository does
-not provide a business-service Docker baseline.
+Current Docker target: local infrastructure Compose only. Business services and
+the RAGFlow Knowledge runtime API/worker run on the host.
 
 ---
 
@@ -219,10 +219,9 @@ Each service label must cover both implementation and documentation paths:
 | `service:auth` | `services/auth/**`, `docs/services/auth/**` |
 | `service:file` | `services/file/**`, `docs/services/file/**` |
 | `service:qa` | `services/qa/**`, `docs/services/qa/**` |
-| `service:knowledge` | `services/knowledge/**`, `docs/services/knowledge/**` |
+| `service:knowledge` | `services/knowledge/**`, `services/knowledge-runtime/**`, `docs/services/knowledge/**` |
 | `service:document` | `services/document/**`, `docs/services/document/**` |
 | `service:ai-gateway` | `services/ai-gateway/**`, `docs/services/ai-gateway/**` |
-| `service:parser` | `services/parser/**`, `docs/services/parser/**` |
 
 All labels referenced by `.github/labeler.json` must exist in the GitHub
 repository. The workflow skips missing labels rather than failing the PR, so
@@ -883,9 +882,10 @@ infrastructure. Business services run on the host.
 Required local sequence:
 
 1. Copy local defaults with `cp deploy/.env.example deploy/.env`.
-2. Run `./scripts/local/dev-up.sh` to pull/start infra, wait for health, apply
-   Qdrant collection initialization, host migrations, and local seed.
-3. Run `./scripts/local/run-backend.sh` to start Auth, File, Parser, Knowledge,
+2. Run `./scripts/local/dev-up.sh` to pull/start infra, wait for long-running
+   service health, run the one-shot `minio-init`, apply Qdrant collection
+   initialization, host migrations, and local seed.
+3. Run `./scripts/local/run-backend.sh` to start Auth, File, Knowledge,
    AI Gateway, QA, Document, and Gateway as host processes.
 4. Run `cd apps/web && bun install && bun run dev` for the frontend.
 
@@ -895,19 +895,36 @@ Runtime rules:
 - Use `deploy/.env.example` as the single default local configuration source.
   Startup scripts may load `deploy/.env`, but must not duplicate service env
   defaults or generate env files for the user.
-- `run-backend.sh` prepares Parser with
-  `uv sync --frozen --group dev --extra paddleocr`; users need uv, not a
-  separate manual Python install step.
+- `run-backend.sh` must not prepare or start the retired standalone Parser.
+  Knowledge parsing runs through the RAGFlow runtime API/worker path.
 - Keep `UV_DEFAULT_INDEX` in `deploy/.env.example` as the default host-run uv
   package index for mainland China developer networks. It affects Python
   dependency downloads only; Docker registry rewrite remains the Compose image
   path.
-- Treat `services/parser/uv.lock` as part of the local startup contract because
-  `run-backend.sh` uses `uv sync --frozen`; Docker/deploy checks should run the
-  local seed/startup contract when that lock file changes.
+- Treat `services/knowledge-runtime/**` and its host-run API/worker scripts as
+  the local runtime contract for Knowledge parsing and retrieval changes.
+- Keep `GOPROXY` and `GOSUMDB` in `deploy/.env.example` as the default host-run
+  Go module proxy/checksum settings for mainland China developer networks. They
+  affect `dev-up.sh` goose migrations and `run-backend.sh` Go service startup,
+  not Docker image pulls or Knowledge runtime uv downloads.
+- `dev-up.sh` must check effective Go module settings before host-run goose
+  migrations, and `run-backend.sh` must preflight each host-run Go service with
+  `go mod download` before forking service processes. If an old `deploy/.env`
+  lacks Go mirror settings, local scripts may use the repository default
+  `GOPROXY` / `GOSUMDB` values for the current process and tell the user to
+  persist them locally. If module download fails, it should fail visibly in the
+  terminal with the current effective values and remediation guidance.
 - Host-run process management is part of the local startup contract:
   `run-backend.sh` should start service commands in managed process groups and
   `stop-backend.sh` should stop those process groups, not just wrapper PIDs.
+- Local entrypoint scripts under `scripts/local/` must print command-line status
+  for start, success, and failure. Failure output should include the current
+  stage and next diagnostic location so contributors are not misled by missing
+  or log-only errors.
+- After forking services, `run-backend.sh` should observe a short configurable
+  startup window and report early process exits with the relevant
+  `.local/logs/<service>.log` tail instead of unconditionally printing
+  `backend started`.
 - Seeded local AI Gateway profiles should use `http://localhost:11434/v1` for
   the host-run default path; container-only hostnames such as
   `host.docker.internal` must fail the local seed/startup contract.

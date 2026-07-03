@@ -1,3 +1,5 @@
+-- Local integration contract: scripts/local/dev-up.sh applies this seed after
+-- service migrations so the demo admin and cross-service fixtures exist.
 \connect auth_system
 
 INSERT INTO auth_users (
@@ -73,6 +75,81 @@ SELECT
     now()
 FROM auth_roles r
 WHERE r.code = 'admin'
+ON CONFLICT (user_id, role_id) DO NOTHING;
+
+INSERT INTO auth_users (
+    id,
+    username,
+    display_name,
+    email,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    'usr_local_super_admin',
+    'superadmin',
+    'Local Demo Super Administrator',
+    'superadmin@example.invalid',
+    'active',
+    now(),
+    now()
+)
+ON CONFLICT (username) WHERE deleted_at IS NULL DO UPDATE
+SET display_name = EXCLUDED.display_name,
+    email = EXCLUDED.email,
+    status = EXCLUDED.status,
+    updated_at = now();
+
+INSERT INTO auth_credentials (
+    id,
+    user_id,
+    credential_type,
+    password_hash,
+    password_hash_alg,
+    password_hash_params_version,
+    password_hash_params_json,
+    password_changed_at,
+    created_at,
+    updated_at
+)
+VALUES (
+    'cred_local_super_admin_password',
+    'usr_local_super_admin',
+    'password',
+    '$argon2id$v=19$m=65536,t=3,p=2$bG9jYWwtZGVtby1zYWx0IQ$tESTl/LqUlaDlE8hP4+CNLG5go/+X2xvYXBdqk+4eOI',
+    'argon2id',
+    'argon2id-v1',
+    '{"memoryKiB":65536,"iterations":3,"parallelism":2,"saltBytes":16,"keyBytes":32}'::jsonb,
+    now(),
+    now(),
+    now()
+)
+ON CONFLICT (user_id, credential_type) DO UPDATE
+SET password_hash = EXCLUDED.password_hash,
+    password_hash_alg = EXCLUDED.password_hash_alg,
+    password_hash_params_version = EXCLUDED.password_hash_params_version,
+    password_hash_params_json = EXCLUDED.password_hash_params_json,
+    password_changed_at = now(),
+    updated_at = now();
+
+INSERT INTO user_roles (
+    id,
+    user_id,
+    role_id,
+    assigned_by,
+    assigned_at,
+    created_at
+)
+SELECT
+    'urole_local_super_admin_super_admin',
+    'usr_local_super_admin',
+    r.id,
+    'local-seed',
+    now(),
+    now()
+FROM auth_roles r
+WHERE r.code = 'super_admin'
 ON CONFLICT (user_id, role_id) DO NOTHING;
 
 \connect knowledge_system
@@ -207,8 +284,8 @@ SET knowledge_base_id = EXCLUDED.knowledge_base_id,
 
 INSERT INTO report_types (code, name, description, enabled, updated_at)
 VALUES
-    ('summer_peak_inspection', 'Summer Peak Inspection Report', 'Local demo report type for peak-season inspection workflows.', true, now()),
-    ('coal_inventory_audit', 'Coal Inventory Audit Report', 'Local demo report type for coal inventory audit workflows.', true, now())
+    ('summer_peak_inspection', '迎峰度夏检查报告', '本地演示：迎峰度夏供电保障与风险检查报告类型。', true, now()),
+    ('coal_inventory_audit', '煤库存审计报告', '本地演示：煤场库存账实、煤质计量与保供风险审计报告类型。', true, now())
 ON CONFLICT (code) DO UPDATE
 SET name = EXCLUDED.name,
     description = EXCLUDED.description,
@@ -248,14 +325,14 @@ INSERT INTO report_materials (
 )
 VALUES (
     '22222222-2222-4222-8222-222222222201',
-    'Local Demo Inspection Notes',
+    '本地演示检查记录',
     'text',
     'local-demo',
     null,
     'local-demo-inspection-notes.md',
     0,
-    'Safe local placeholder material for report list/detail inspection.',
-    '["local-demo","seed","no-file-ref"]'::jsonb,
+    '用于本地联调的安全占位素材，不包含真实文件引用或生产内容。',
+    '["本地演示","种子数据","无文件引用"]'::jsonb,
     true,
     'usr_local_admin',
     now(),
@@ -316,17 +393,17 @@ INSERT INTO reports (
 )
 VALUES (
     '22222222-2222-4222-8222-222222222301',
-    'Local Demo Summer Peak Inspection Report',
+    '本地演示迎峰度夏检查报告',
     'summer_peak_inspection',
     '11111111-1111-4111-8111-111111111101',
-    'Local demo summer peak readiness',
-    'power-grid',
-    'Local Demo Plant',
+    '本地演示迎峰度夏保供检查',
+    '电网运行',
+    '本地演示电厂',
     2026,
     'generated',
     '{"seed":"local-demo","privateContent":false,"usesRealProvider":false}'::jsonb,
     'usr_local_admin',
-    'Local Demo Administrator',
+    '本地演示管理员',
     'local_seed',
     null,
     null,

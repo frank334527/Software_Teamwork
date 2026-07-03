@@ -11,18 +11,24 @@ from pathlib import Path
 
 SEED_001 = Path("deploy/seeds/001-local-demo-seed.sql")
 SEED_002 = Path("deploy/seeds/002-ai-gateway-model-profiles.sql")
+SEED_003 = Path("deploy/seeds/003-qa-document-mcp.sql")
 CLEANUP_SEED = Path("deploy/seeds/099-local-demo-cleanup.sql")
 DEPLOY_README = Path("deploy/README.md")
 LOCAL_RUNBOOK = Path("docs/runbooks/local-integration.md")
 ENV_EXAMPLE = Path("deploy/.env.example")
+GITIGNORE = Path(".gitignore")
 AUTH_MIGRATIONS_DIR = Path("services/auth/migrations")
 DEV_UP_SCRIPT = Path("scripts/local/dev-up.sh")
 RUN_BACKEND_SCRIPT = Path("scripts/local/run-backend.sh")
 STOP_BACKEND_SCRIPT = Path("scripts/local/stop-backend.sh")
-PARSER_UV_LOCK = Path("services/parser/uv.lock")
 
 REQUIRED_SEED_001_TOKENS = {
     "Auth local admin user": ["usr_local_admin", "cred_local_admin_password", "urole_local_admin_admin"],
+    "Auth local super admin user": [
+        "usr_local_super_admin",
+        "cred_local_super_admin_password",
+        "urole_local_super_admin_super_admin",
+    ],
     "Knowledge sample": ["kb_local_demo", "doc_local_demo_seed", "chunk_local_demo_seed_001"],
     "Document sample": [
         "22222222-2222-4222-8222-222222222201",
@@ -60,6 +66,18 @@ REQUIRED_AI_TOKENS = [
     "local-demo-key-v1",
 ]
 
+REQUIRED_DOCUMENT_MCP_TOKENS = [
+    r"\\connect\s+qa_system",
+    "33333333-3333-4333-8333-333333333601",
+    "'document'",
+    "'Document MCP'",
+    "'streamable_http'",
+    "'http://localhost:8085/mcp'",
+    "'Authorization'",
+    "'local-seed'",
+    "ON CONFLICT (alias) DO UPDATE",
+]
+
 FORBIDDEN_AI_TOKENS = [
     "host.docker.internal",
 ]
@@ -89,18 +107,41 @@ REQUIRED_DOC_TOKENS = [
     "唯一默认配置来源",
     "LOCAL_ADMIN_USERNAME=admin",
     "LOCAL_ADMIN_PASSWORD=LocalDemoAdmin#12345",
+    "LOCAL_SUPER_ADMIN_USERNAME=superadmin",
+    "LOCAL_SUPER_ADMIN_PASSWORD=LocalDemoAdmin#12345",
     "admin / LocalDemoAdmin#12345",
+    "superadmin / LocalDemoAdmin#12345",
     "cp deploy/.env.example deploy/.env",
+    "Go modules 下载默认读取 `deploy/.env`",
+    "如需使用 Go 官方默认值",
+    "GOPROXY=https://proxy.golang.org,direct",
+    "GOSUMDB=sum.golang.org",
     "./scripts/local/dev-up.sh",
     "./scripts/local/run-backend.sh",
     "down -v",
 ]
 
 REQUIRED_DEV_UP_TOKENS = [
+    "local dev-up: starting",
+    "local dev-up: completed successfully",
+    "local dev-up: failed during",
+    "Check Docker with:",
+    "If Go module download failed, confirm deploy/.env contains GOPROXY and GOSUMDB.",
+    "checking local tool dependencies",
+    "missing required local command(s):",
+    "Install Docker, Go, psql, and curl",
+    "Install the missing host tool(s)",
+    "checking Go module settings",
+    "using repository default for this run",
     "goose@v3.27.1",
     "psql",
+    "INFRA_SERVICES=(postgres redis qdrant minio)",
+    "initializing MinIO buckets",
+    "--exit-code-from minio-init",
+    "docker compose -f deploy/docker-compose.yml --env-file deploy/.env logs minio-init",
     "001-local-demo-seed.sql",
     "002-ai-gateway-model-profiles.sql",
+    "003-qa-document-mcp.sql",
     "--wait",
     "--wait-timeout",
     "initialize_qdrant_collection",
@@ -118,13 +159,28 @@ REQUIRED_DEV_UP_TOKENS = [
 ]
 
 REQUIRED_RUN_BACKEND_TOKENS = [
+    "local backend startup: starting",
+    "local backend startup: completed successfully",
+    "local backend startup: failed during",
+    "Check service logs under .local/logs/",
     "setsid",
-    "uv sync --frozen --group dev --extra paddleocr",
-    "uv run --frozen parser-service",
+    "go mod download",
+    "checking Go modules",
+    "using repository default for this run",
+    "LOCAL_GO_MOD_DOWNLOAD_TIMEOUT_SECONDS",
+    "go mod download timed out",
+    "Go module download failed before backend startup completed.",
+    "Current effective Go module settings:",
+    "LOCAL_BACKEND_STARTUP_CHECK_SECONDS",
+    "backend startup failed",
+    "The failed service log tails are shown below.",
+    "Backend process startup failed after services were forked.",
+    "instead of treating it as a Go module mirror issue.",
     "auth",
     "file",
-    "parser",
     "knowledge",
+    "./cmd/adapter",
+    'go run "$go_target"',
     "ai-gateway",
     "qa",
     "document",
@@ -132,6 +188,10 @@ REQUIRED_RUN_BACKEND_TOKENS = [
 ]
 
 REQUIRED_STOP_BACKEND_TOKENS = [
+    "local backend stop: starting",
+    "local backend stop: completed successfully",
+    "local backend stop: failed during",
+    "nothing to stop",
     'kill -0 -- "-$pid"',
     'kill -TERM -- "-$pid"',
     'kill -KILL -- "-$pid"',
@@ -139,16 +199,19 @@ REQUIRED_STOP_BACKEND_TOKENS = [
 
 REQUIRED_ENV_TOKENS = [
     "UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple",
-]
-
-REQUIRED_PARSER_UV_LOCK_TOKENS = [
-    'source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }',
-    "https://pypi.tuna.tsinghua.edu.cn/packages/",
-]
-
-FORBIDDEN_PARSER_UV_LOCK_TOKENS = [
-    "https://pypi.org/simple",
-    "https://files.pythonhosted.org",
+    "GOPROXY=https://goproxy.cn,direct",
+    "GOSUMDB=sum.golang.google.cn",
+    "MCP_TRANSPORT=streamable_http",
+    "MCP_SERVER_ALIAS=document",
+    "MCP_SERVER_URL=http://localhost:8085/mcp",
+    "MCP_SERVER_TOKEN=local-dev-internal-service-token-change-me",
+    "MCP_SERVER_TOKEN_HEADER=Authorization",
+    "DB_TYPE=postgres",
+    "VENDOR_RUNTIME_URL=http://127.0.0.1:9380",
+    "VENDOR_RUNTIME_SERVICE_TOKEN=",
+    "KNOWLEDGE_RUNTIME_SERVICE_TOKEN=",
+    "KNOWLEDGE_AUTO_START_INGESTION=false",
+    "# DOC_ENGINE=elasticsearch",
 ]
 
 FORBIDDEN_STARTUP_DOC_TOKENS = [
@@ -160,6 +223,7 @@ FORBIDDEN_STARTUP_DOC_TOKENS = [
     "export AI_GATEWAY_DATABASE_URL",
     "docker compose up --build",
     "docker compose --profile ai",
+    "seed-local",
 ]
 
 FORBIDDEN_PATTERNS = [
@@ -178,6 +242,7 @@ def verify_local_seed_contract(root: Path) -> list[str]:
 
     seed_001 = read_required(root, SEED_001, issues)
     seed_002 = read_required(root, SEED_002, issues)
+    seed_003 = read_required(root, SEED_003, issues)
     cleanup_seed = read_required(root, CLEANUP_SEED, issues)
     auth_migrations = read_required_glob(root, AUTH_MIGRATIONS_DIR, "*.sql", issues)
     deploy_readme = read_required(root, DEPLOY_README, issues)
@@ -186,10 +251,11 @@ def verify_local_seed_contract(root: Path) -> list[str]:
     dev_up_script = read_required(root, DEV_UP_SCRIPT, issues)
     run_backend_script = read_required(root, RUN_BACKEND_SCRIPT, issues)
     stop_backend_script = read_required(root, STOP_BACKEND_SCRIPT, issues)
-    parser_uv_lock = read_required(root, PARSER_UV_LOCK, issues)
+    gitignore = read_required(root, GITIGNORE, issues)
 
     issues.extend(validate_seed_001(seed_001))
     issues.extend(validate_seed_002(seed_002))
+    issues.extend(validate_seed_003(seed_003))
     issues.extend(validate_cleanup_seed(cleanup_seed))
     issues.extend(validate_auth_migrations(auth_migrations))
     issues.extend(
@@ -202,7 +268,7 @@ def verify_local_seed_contract(root: Path) -> list[str]:
             stop_backend_script,
         )
     )
-    issues.extend(validate_parser_uv_lock(parser_uv_lock))
+    issues.extend(validate_gitignore(gitignore))
     issues.extend(validate_forbidden_content(root))
     return issues
 
@@ -269,19 +335,36 @@ def validate_seed_002(content: str) -> list[str]:
     return issues
 
 
+def validate_seed_003(content: str) -> list[str]:
+    if not content:
+        return []
+    issues: list[str] = []
+    for token in REQUIRED_DOCUMENT_MCP_TOKENS:
+        if token.startswith(r"\\connect"):
+            if not re.search(token, content):
+                issues.append(f"{SEED_003} missing database section matching `{token}`")
+        elif token not in content:
+            issues.append(f"{SEED_003} missing Document MCP token `{token}`")
+    if "token_encrypted" not in content or "NULL" not in content:
+        issues.append(f"{SEED_003} must keep the Document MCP credential out of PostgreSQL")
+    return issues
+
+
 def validate_cleanup_seed(content: str) -> list[str]:
     if not content:
         return []
     issues: list[str] = []
     for token in [
         "usr_local_admin",
+        "usr_local_super_admin",
         "doc_local_demo_seed",
         "22222222-2222-4222-8222-222222222301",
         "33333333-3333-4333-8333-333333333301",
+        "33333333-3333-4333-8333-333333333601",
     ]:
         if token not in content:
             issues.append(f"{CLEANUP_SEED} missing cleanup token `{token}`")
-    for table in ["message_content_blocks", "report_section_versions", "document_chunks", "auth_credentials"]:
+    for table in ["mcp_servers", "message_content_blocks", "report_section_versions", "document_chunks", "auth_credentials"]:
         if table not in content:
             issues.append(f"{CLEANUP_SEED} missing cleanup table `{table}`")
     return issues
@@ -329,16 +412,13 @@ def validate_docs(
     return issues
 
 
-def validate_parser_uv_lock(content: str) -> list[str]:
+def validate_gitignore(content: str) -> list[str]:
     if not content:
         return []
     issues: list[str] = []
-    for token in REQUIRED_PARSER_UV_LOCK_TOKENS:
+    for token in ["/.local/", "DL_T_673-1999.pdf"]:
         if token not in content:
-            issues.append(f"{PARSER_UV_LOCK} missing parser uv mirror token `{token}`")
-    for token in FORBIDDEN_PARSER_UV_LOCK_TOKENS:
-        if token in content:
-            issues.append(f"{PARSER_UV_LOCK} must not lock parser packages to `{token}`")
+            issues.append(f"{GITIGNORE} missing local runtime ignore token `{token}`")
     return issues
 
 
@@ -347,6 +427,7 @@ def validate_forbidden_content(root: Path) -> list[str]:
     for relative in [
         SEED_001,
         SEED_002,
+        SEED_003,
         CLEANUP_SEED,
         DEPLOY_README,
         LOCAL_RUNBOOK,

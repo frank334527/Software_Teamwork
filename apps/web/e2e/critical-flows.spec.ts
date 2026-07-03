@@ -109,6 +109,25 @@ async function mockGateway(page: Page) {
     })
   })
 
+  await page.route('**/api/v1/qa-sessions/*/attachments**', async (route) => {
+    const method = route.request().method()
+    if (method === 'GET') {
+      await route.fulfill({
+        contentType: 'application/json',
+        json: { data: [], page: { page: 1, pageSize: 20, total: 0 }, requestId: 'req-att' },
+        status: 200,
+      })
+      return
+    }
+    await route.fulfill({
+      contentType: 'application/json',
+      json: {
+        error: { code: 'not_implemented', message: 'not implemented', requestId: 'req-att' },
+      },
+      status: 501,
+    })
+  })
+
   await page.route('**/api/v1/qa-sessions*', async (route) => {
     if (route.request().method() === 'POST') {
       await route.fulfill({
@@ -220,6 +239,68 @@ async function mockGateway(page: Page) {
         ],
         page: { page: 1, pageSize: 20, total: 1 },
         requestId: 'req-materials',
+      },
+    })
+  })
+
+  await page.route('**/api/v1/llm-config-versions/current', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      json: {
+        data: {
+          createdAt: '2026-06-30T00:00:00Z',
+          id: 'llm-current',
+          isActive: true,
+          modelName: 'gpt-report',
+          profileId: 'mp-chat-report',
+          provider: 'ai-gateway',
+          versionNo: 1,
+        },
+        requestId: 'req-llm-current',
+      },
+    })
+  })
+
+  await page.route('**/api/v1/report-settings', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      json: {
+        data: {
+          llm: {
+            model: 'gpt-report',
+            profileId: 'mp-chat-report',
+            provider: 'ai-gateway',
+            timeoutSeconds: 60,
+          },
+        },
+        requestId: 'req-report-settings',
+      },
+    })
+  })
+
+  await page.route('**/api/v1/admin/model-profiles*', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      json: {
+        data: [
+          {
+            apiKeyConfigured: true,
+            baseUrl: 'https://api.example.com/v1',
+            createdAt: '2026-06-30T00:00:00Z',
+            defaultParameters: {},
+            enabled: true,
+            id: 'mp-chat-report',
+            isDefault: false,
+            model: 'gpt-report',
+            name: '报告生成模型',
+            provider: 'openai_compatible',
+            purpose: 'chat',
+            supportsStreaming: true,
+            timeoutMs: 60000,
+            updatedAt: '2026-06-30T00:00:00Z',
+          },
+        ],
+        requestId: 'req-model-profiles',
       },
     })
   })
@@ -375,7 +456,7 @@ test.describe('frontend critical smoke flows', () => {
     await expect(page.locator('body')).toContainText('请检查油温和负荷趋势。')
   })
 
-  test('starts report generation and reaches the job progress panel', async ({ page }) => {
+  test('starts report generation and reaches the job progress summary', async ({ page }) => {
     await login(page)
     await page.goto('/reports/generate')
     await page

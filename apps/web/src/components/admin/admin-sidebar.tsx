@@ -10,6 +10,7 @@ import {
   MessageSquareText,
   Package,
   Settings,
+  UsersRound,
   Wrench,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
@@ -34,10 +35,10 @@ const menuItems: AdminNavigationItem[] = [
     label: '系统管理',
     children: [
       {
-        key: 'styles',
-        label: '样式管理',
-        path: '/admin/styles',
-        requirement: { any: ['system:admin'] },
+        key: 'users',
+        label: '用户管理',
+        path: '/admin/users',
+        requirement: { roles: ['admin', 'super_admin'] },
       },
       {
         key: 'prompts',
@@ -67,10 +68,8 @@ const menuItems: AdminNavigationItem[] = [
     requirement: {
       any: [
         'system:admin',
-        'knowledge:read',
         'knowledge:write',
         'knowledge:admin',
-        'document:upload',
         'admin:model-profile:write',
         'admin:parser-config:write',
       ],
@@ -86,19 +85,19 @@ const menuItems: AdminNavigationItem[] = [
         key: 'knowledge-documents',
         label: '文档管理',
         path: '/admin/knowledge/documents',
-        requirement: { any: ['knowledge:read', 'knowledge:write', 'document:upload'] },
+        requirement: { any: ['knowledge:write', 'knowledge:admin', 'system:admin'] },
       },
       {
         key: 'knowledge-search',
         label: '知识检索',
         path: '/admin/knowledge/search',
-        requirement: { any: ['knowledge:read'] },
+        requirement: { any: ['knowledge:write', 'knowledge:admin', 'system:admin'] },
       },
       {
         key: 'knowledge-config',
         label: '知识配置',
         path: '/admin/knowledge-config',
-        requirement: { any: ['knowledge:read'] },
+        requirement: { any: ['knowledge:admin', 'knowledge:write', 'system:admin'] },
       },
       {
         key: 'qa-settings',
@@ -136,7 +135,7 @@ const menuItems: AdminNavigationItem[] = [
     key: 'stats',
     label: 'QA 统计',
     path: '/admin/stats',
-    requirement: { any: ['qa:use', 'system:admin'] },
+    requirement: { any: ['system:admin'] },
   },
   {
     key: 'settings',
@@ -148,6 +147,7 @@ const menuItems: AdminNavigationItem[] = [
 
 const ICON_MAP: Record<string, typeof Settings> = {
   system: Settings,
+  users: UsersRound,
   stats: BarChart3,
   reports: FileText,
   templates: LayoutTemplate,

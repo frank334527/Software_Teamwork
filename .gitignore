@@ -53,6 +53,12 @@ out/
 *.dll
 *.so
 *.dylib
+# Service-root binaries produced by running `go build ./cmd/<name>` from a
+# service directory.
+services/*/server
+services/*/adapter
+services/*/agent
+services/*/mcp-echo
 
 # Go test binaries and coverage artifacts
 *.test
@@ -79,6 +85,7 @@ minio-data/
 *.tar.gz
 
 # Local runtime artifacts
+/.local/
 .worktrees/
 legacy-runtime-data/
 tmp/
@@ -131,3 +138,10 @@ reports/rendered_pages/
 *.bak
 *.tmp
 *.orig
+
+# Vendored upstream source snapshots.
+!services/knowledge-runtime/bin/
+!services/knowledge-runtime/bin/.gitkeep
+
+# Local PDF fixture for manual Knowledge runtime smoke tests.
+DL_T_673-1999.pdf

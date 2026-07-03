@@ -12,6 +12,7 @@ import {
   downloadReportFile,
   getReport,
   getReportJob,
+  getReportSettings,
   getReportStatisticsOverview,
   getReportTemplateStructure,
   listDailyReportStatistics,
@@ -25,15 +26,24 @@ import {
   listSectionVersions,
   updateReportOutline,
   updateReportSection,
+  updateReportSettings,
   updateReportTemplateStructure,
 } from './report-generation.api'
 import type {
   CreateReportJobPayload,
   CreateReportPayload,
+  ReportEvent,
+  ReportJob,
   ReportJobStatus,
   ReportOutline,
   ReportTemplateStructure,
+  UpdateReportSettingsRequest,
 } from './report-generation.types'
+
+const activeReportPollIntervalMs = 3000
+const pendingReportEventPollIntervalMs = 5000
+const failedReportRetryPollIntervalMs = 8000
+const failedReportRetryGraceMs = 3 * 60 * 1000
 
 const terminalReportJobStatuses = new Set<ReportJobStatus>([
   'succeeded',
@@ -42,8 +52,44 @@ const terminalReportJobStatuses = new Set<ReportJobStatus>([
   'canceled',
 ])
 
+const terminalReportEventTypes = new Set([
+  'job.completed',
+  'job.succeeded',
+  'job.partial_succeeded',
+  'job.canceled',
+])
+
 function isTerminalReportJobStatus(status: ReportJobStatus): boolean {
   return terminalReportJobStatuses.has(status)
+}
+
+function isWithinFailedReportRetryGrace(referenceTime?: string): boolean {
+  if (!referenceTime) return false
+  const timestamp = Date.parse(referenceTime)
+  return Number.isFinite(timestamp) && Date.now() - timestamp < failedReportRetryGraceMs
+}
+
+export function getReportJobRefetchInterval(job?: ReportJob): number | false {
+  if (!job) return false
+  if (job.status === 'pending' || job.status === 'running') return activeReportPollIntervalMs
+  if (job.status === 'failed' && isWithinFailedReportRetryGrace(job.finishedAt ?? job.createdAt)) {
+    return failedReportRetryPollIntervalMs
+  }
+  return false
+}
+
+export function getReportEventsRefetchInterval(events?: ReportEvent[]): number | false {
+  if (!events || events.length === 0) return pendingReportEventPollIntervalMs
+
+  const latest = events[events.length - 1]
+  if (!latest) return pendingReportEventPollIntervalMs
+  if (terminalReportEventTypes.has(latest.eventType)) return false
+  if (latest.eventType === 'job.failed') {
+    return isWithinFailedReportRetryGrace(latest.createdAt)
+      ? failedReportRetryPollIntervalMs
+      : false
+  }
+  return pendingReportEventPollIntervalMs
 }
 
 export const reportKeys = {
@@ -61,6 +107,7 @@ export const reportKeys = {
   sectionVersions: (reportId: string, sectionId: string) =>
     [...reportKeys.all, reportId, 'sections', sectionId, 'versions'] as const,
   stats: () => [...reportKeys.all, 'statistics'] as const,
+  settings: () => [...reportKeys.all, 'settings'] as const,
   templateStructure: (templateId: string) =>
     [...reportKeys.templates(), templateId, 'structure'] as const,
 }
@@ -119,8 +166,7 @@ export function useReportJobQuery(jobId: string | null) {
     queryFn: () => getReportJob(jobId ?? ''),
     enabled: Boolean(jobId),
     refetchInterval: (query) => {
-      const status = query.state.data?.status
-      return status === 'pending' || status === 'running' ? 3000 : false
+      return getReportJobRefetchInterval(query.state.data)
     },
   })
 
@@ -252,6 +298,29 @@ export function useReportStatisticsQueries() {
   return { overviewQuery, dailyQuery }
 }
 
+type UseReportSettingsQueryOptions = {
+  enabled?: boolean
+}
+
+export function useReportSettingsQuery(options: UseReportSettingsQueryOptions = {}) {
+  return useQuery({
+    queryKey: reportKeys.settings(),
+    queryFn: getReportSettings,
+    enabled: options.enabled ?? true,
+  })
+}
+
+export function useUpdateReportSettingsMutation() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (payload: UpdateReportSettingsRequest) => updateReportSettings(payload),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: reportKeys.settings() })
+    },
+  })
+}
+
 export function useReport(reportId: string | null) {
   return useQuery({
     queryKey: reportKeys.detail(reportId ?? ''),
@@ -310,15 +379,7 @@ export function useReportEvents(reportId: string | null) {
     queryFn: () => listReportEvents(reportId ?? ''),
     enabled: Boolean(reportId),
     refetchInterval: (query) => {
-      const events = query.state.data
-      // Keep polling until a terminal event is received; empty list is normal
-      // at job start and should not stop polling.
-      if (!events || events.length === 0) return 5000
-      const latest = events[events.length - 1]
-      if (latest?.eventType === 'job.completed' || latest?.eventType === 'job.failed') {
-        return false
-      }
-      return 5000
+      return getReportEventsRefetchInterval(query.state.data)
     },
     select: (data) => data,
   })

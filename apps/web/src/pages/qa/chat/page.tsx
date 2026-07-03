@@ -3,7 +3,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { replayEvents, streamChat } from '@/api/chat'
 import { gatewayFileRequest } from '@/api/client'
-import { ChatInput, ChatMessages, ChatSidebar } from '@/components/chat'
+import {
+  deleteSessionAttachment,
+  getSessionAttachment,
+  listSessionAttachments,
+} from '@/api/conversations'
+import { AttachmentList, AttachmentUploadStatus } from '@/components/chat'
+import { ChatInput, ChatMessages, ChatSidebar, useAttachmentUpload } from '@/components/chat'
+import { ConfirmDialog } from '@/components/common'
 import {
   useCreateSession,
   useDeleteSession,
@@ -11,15 +18,21 @@ import {
   useSessionMessages,
   useSessions,
 } from '@/features/qa'
-import { parseReportArtifact } from '@/features/qa/capability'
+import {
+  getToolEventSummary,
+  getToolReportArtifact,
+  mergeMessageReportArtifact,
+} from '@/features/qa/capability'
 import { downloadFromUrl } from '@/lib/download'
 import type {
   QACitation,
   QAMessage,
+  QAMessageWithArtifacts,
   QAReportArtifact,
   QASession,
   QASessionListItem,
   QAThinkingStep,
+  SessionAttachmentSummary,
 } from '@/lib/types'
 import { useChatStore } from '@/stores/chat-store'
 
@@ -28,7 +41,15 @@ import { useChatStore } from '@/stores/chat-store'
 // ══════════════════════════════════════════════════════════════════════════════
 
 function nextId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2)
+  const cryptoSource = globalThis.crypto
+  if (typeof cryptoSource?.randomUUID === 'function') {
+    return cryptoSource.randomUUID()
+  }
+  if (typeof cryptoSource?.getRandomValues !== 'function') {
+    throw new Error('Secure random generator unavailable')
+  }
+  const bytes = cryptoSource.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 function toSessionListItem(s: QASession, messages: QAMessage[]): QASessionListItem {
@@ -70,7 +91,20 @@ const VALID_STEP_TYPES = new Set([
   'verify',
 ])
 
-function sanitizeThinkingStep(raw: Record<string, unknown>): QAThinkingStep {
+export type ToolThinkingStep = QAThinkingStep & {
+  argumentsSummary?: unknown
+  completedAt?: number
+  errorSummary?: string
+  iterationNo?: number
+  reasoningStepId?: string
+  reportArtifact?: QAReportArtifact
+  resultSummary?: unknown
+  startedAt?: number
+  toolCallId?: string
+  toolName?: string
+}
+
+export function sanitizeThinkingStep(raw: Record<string, unknown>): ToolThinkingStep {
   const rawType = String(raw.type ?? '')
   // Only allow known step types; discard unknown / internal-only types
   const type = (VALID_STEP_TYPES.has(rawType) ? rawType : 'generation') as QAThinkingStep['type']
@@ -81,7 +115,17 @@ function sanitizeThinkingStep(raw: Record<string, unknown>): QAThinkingStep {
       : 'running'
   ) as QAThinkingStep['status']
   const detail = sanitizeLabel(typeof raw.detail === 'string' ? raw.detail : undefined)
-  return { type, label, status, detail }
+  const iterationNo = getIterationNo(raw)
+  const rawReasoningStepId =
+    typeof raw.reasoningStepId === 'string'
+      ? raw.reasoningStepId
+      : typeof raw.stepId === 'string'
+        ? raw.stepId
+        : typeof raw.id === 'string'
+          ? raw.id
+          : undefined
+  const reasoningStepId = sanitizeLabel(rawReasoningStepId)
+  return { type, label, status, detail, iterationNo, reasoningStepId }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -134,6 +178,58 @@ function sanitizeToolName(raw: unknown): string {
   const trimmed = raw.slice(0, 80)
   if (SENSITIVE_PATTERN.test(trimmed)) return '检索工具'
   return trimmed
+}
+
+function getToolName(data: Record<string, unknown>): string {
+  return sanitizeToolName(data.toolName ?? data.tool)
+}
+
+function getIterationNo(data: Record<string, unknown>): number | undefined {
+  return typeof data.iterationNo === 'number' && Number.isFinite(data.iterationNo)
+    ? data.iterationNo
+    : undefined
+}
+
+function getToolFailureSummary(data: Record<string, unknown>): string | undefined {
+  const raw =
+    typeof data.errorMessage === 'string'
+      ? data.errorMessage
+      : typeof data.error === 'string'
+        ? data.error
+        : typeof data.summary === 'string'
+          ? data.summary
+          : undefined
+  return sanitizeLabel(raw)
+}
+
+function getReasoningStepKey(step: ToolThinkingStep): string | undefined {
+  if (!step.reasoningStepId) return undefined
+  return `${step.iterationNo ?? 'unknown'}:${step.type}:${step.reasoningStepId}`
+}
+
+export function upsertReasoningStep(
+  steps: ToolThinkingStep[],
+  step: ToolThinkingStep,
+): ToolThinkingStep[] {
+  const key = getReasoningStepKey(step)
+  if (!key) return [...steps, step]
+
+  const idx = steps.findIndex((existing) => getReasoningStepKey(existing) === key)
+  if (idx < 0) return [...steps, step]
+
+  const next = [...steps]
+  next[idx] = step
+  return next
+}
+
+export function finalizeThinkingStepsOnAnswerCompleted(
+  steps: ToolThinkingStep[],
+): ToolThinkingStep[] {
+  return steps.map((step) =>
+    step.type === 'agent_iteration' && step.status === 'running'
+      ? { ...step, status: 'done' as const }
+      : step,
+  )
 }
 
 const SUGGESTED_PROMPTS = [
@@ -256,6 +352,13 @@ export function ChatPage() {
   const updateSessionMessages = useChatStore((s) => s.updateSessionMessages)
   const appendSessionMessages = useChatStore((s) => s.appendSessionMessages)
   const messagesBySession = useChatStore((s) => s.messagesBySession)
+  const attachmentsBySession = useChatStore((s) => s.attachmentsBySession)
+  const excludedAttachmentIds = useChatStore((s) => s.excludedAttachmentIds)
+  const setSessionAttachments = useChatStore((s) => s.setSessionAttachments)
+  const addAttachment = useChatStore((s) => s.addAttachment)
+  const updateAttachment = useChatStore((s) => s.updateAttachment)
+  const removeAttachment = useChatStore((s) => s.removeAttachment)
+  const toggleAttachmentExcluded = useChatStore((s) => s.toggleAttachmentExcluded)
 
   // ── React Query: messages for active session (loaded separately from QASession) ──
   const { data: serverMessages, isError: messagesError } = useSessionMessages(activeId ?? '')
@@ -265,6 +368,44 @@ export function ChatPage() {
 
   // ── Three-phase state machine: empty → transitioning → active ──
   const [chatPhase, setChatPhase] = useState<'empty' | 'active'>('empty')
+
+  // ── Attachment upload hook ──
+  const handleAttachmentReady = useCallback(
+    (attachment: SessionAttachmentSummary) => {
+      const sid = attachment.sessionId || activeId
+      if (!sid) return
+      const current = useChatStore.getState().attachmentsBySession[sid] ?? []
+      const tempIds = current.filter((a) => a.id.startsWith('temp-')).map((a) => a.id)
+      for (const tempId of tempIds) {
+        removeAttachment(sid, tempId)
+      }
+      const exists = current.some((a) => a.id === attachment.id)
+      if (exists) {
+        updateAttachment(sid, attachment.id, attachment)
+      } else {
+        addAttachment(sid, attachment)
+      }
+    },
+    [activeId, updateAttachment, addAttachment, removeAttachment],
+  )
+
+  const handleAttachCleanup = useCallback(
+    (uploadSessionId: string) => {
+      if (!uploadSessionId) return
+      const current = useChatStore.getState().attachmentsBySession[uploadSessionId] ?? []
+      const tempIds = current.filter((a) => a.id.startsWith('temp-')).map((a) => a.id)
+      for (const tempId of tempIds) {
+        removeAttachment(uploadSessionId, tempId)
+      }
+    },
+    [removeAttachment],
+  )
+
+  const { uploadState, uploadFile, dismissUpload } = useAttachmentUpload(
+    activeId,
+    handleAttachmentReady,
+    handleAttachCleanup,
+  )
 
   // ── Mutations ──
   const createSessionMut = useCreateSession()
@@ -361,6 +502,68 @@ export function ChatPage() {
   }, [messagesError, activeId, setError])
 
   // ══════════════════════════════════════════════════════════════════════════
+  // Load attachments when active session changes
+  // ══════════════════════════════════════════════════════════════════════════
+
+  useEffect(() => {
+    if (!activeId) return
+
+    listSessionAttachments(activeId)
+      .then((result) => {
+        // Merge: server list is authoritative for real attachments. Only keep
+        // local items that are temp-* or still in-flight (uploaded/parsing)
+        // and not yet visible in the server response. Stale ready/failed items
+        // missing from server (deleted in another tab, TTL purge, etc.) are
+        // dropped so they won't be included in the next message send.
+        const serverIds = new Set(result.items.map((a) => a.id))
+        const local = useChatStore.getState().attachmentsBySession[activeId] ?? []
+        const localOnly = local.filter(
+          (a) =>
+            !serverIds.has(a.id) &&
+            (a.id.startsWith('temp-') || a.status === 'uploaded' || a.status === 'parsing'),
+        )
+        setSessionAttachments(activeId, [...result.items, ...localOnly])
+      })
+      .catch(() => {
+        // Attachments are optional; don't surface loading errors as critical
+      })
+  }, [activeId, setSessionAttachments])
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Background polling for non-terminal attachments (uploaded / parsing)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  useEffect(() => {
+    if (!activeId) return
+
+    const currentAttachments = attachmentsBySession[activeId] ?? []
+    const pollingIds = currentAttachments
+      .filter(
+        (a) => (a.status === 'uploaded' || a.status === 'parsing') && !a.id.startsWith('temp-'),
+      )
+      .map((a) => a.id)
+
+    if (pollingIds.length === 0) return
+
+    const interval = setInterval(() => {
+      const sessionId = activeId
+      if (!sessionId) return
+
+      for (const id of pollingIds) {
+        getSessionAttachment(sessionId, id)
+          .then((updated) => {
+            updateAttachment(sessionId, id, updated)
+          })
+          .catch(() => {
+            // Silently continue polling
+          })
+      }
+    }, 2000)
+
+    return () => clearInterval(interval)
+  }, [activeId, attachmentsBySession, updateAttachment])
+
+  // ══════════════════════════════════════════════════════════════════════════
   // Cleanup SSE on unmount
   // ══════════════════════════════════════════════════════════════════════════
 
@@ -382,6 +585,85 @@ export function ChatPage() {
       }),
     [sessions, messagesBySession],
   )
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Attachment handlers
+  // ══════════════════════════════════════════════════════════════════════════
+
+  const handleFileSelect = useCallback(
+    (file: File) => {
+      if (!activeId) return
+
+      // Clean up any stale temp-* items from a previous aborted upload before
+      // adding the new one, so they don't accumulate in the list indefinitely.
+      const current = useChatStore.getState().attachmentsBySession[activeId] ?? []
+      for (const a of current) {
+        if (a.id.startsWith('temp-')) {
+          removeAttachment(activeId, a.id)
+        }
+      }
+
+      // Optimistically add the attachment to the store
+      const tempAttachment: SessionAttachmentSummary = {
+        id: `temp-${Date.now()}`,
+        sessionId: activeId,
+        filename: file.name,
+        contentType: file.type || 'application/octet-stream',
+        sizeBytes: file.size,
+        status: 'uploaded',
+        createdAt: new Date().toISOString(),
+      }
+      addAttachment(activeId, tempAttachment)
+
+      // Start the actual upload + polling flow
+      uploadFile(file)
+    },
+    [activeId, addAttachment, removeAttachment, uploadFile],
+  )
+
+  const [deleteAttachmentTarget, setDeleteAttachmentTarget] = useState<{
+    sessionId: string
+    attachmentId: string
+  } | null>(null)
+
+  const handleDeleteAttachment = useCallback((sessionId: string, attachmentId: string) => {
+    setDeleteAttachmentTarget({ sessionId, attachmentId })
+  }, [])
+
+  const confirmDeleteAttachment = useCallback(async () => {
+    const target = deleteAttachmentTarget
+    setDeleteAttachmentTarget(null)
+    if (!target) return
+    const { sessionId: targetSid, attachmentId: targetAid } = target
+    // temp-* attachments only exist locally — skip backend call and just clean up
+    if (targetAid.startsWith('temp-')) {
+      removeAttachment(targetSid, targetAid)
+      // Only dismiss the upload bar if this temp belongs to the current session
+      if (targetSid === activeId) dismissUpload()
+      return
+    }
+    try {
+      await deleteSessionAttachment(targetSid, targetAid)
+      removeAttachment(targetSid, targetAid)
+    } catch {
+      setError('删除附件失败')
+    }
+  }, [activeId, deleteAttachmentTarget, removeAttachment, setError, dismissUpload])
+
+  const handleToggleAttachmentExcluded = useCallback(
+    (attachmentId: string) => {
+      if (!activeId) return
+      toggleAttachmentExcluded(activeId, attachmentId)
+    },
+    [activeId, toggleAttachmentExcluded],
+  )
+
+  // ── Derived attachment data ──
+  const activeAttachments = activeId ? (attachmentsBySession[activeId] ?? []) : []
+  const activeExcludedIds = activeId ? (excludedAttachmentIds[activeId] ?? []) : []
+  const visibleAttachmentCount = activeAttachments.filter(
+    (a) => a.status !== 'failed' && a.status !== 'purged',
+  ).length
 
   // ══════════════════════════════════════════════════════════════════════════
   // Create session
@@ -530,7 +812,7 @@ export function ChatPage() {
 
       // Accumulators for SSE events
       let content = ''
-      const steps: QAThinkingStep[] = []
+      let steps: ToolThinkingStep[] = []
       const toolStepIndex: Record<string, number> = {}
       const cites: QACitation[] = []
 
@@ -544,6 +826,7 @@ export function ChatPage() {
         thinking?: QAThinkingStep[]
         citations?: QACitation[]
         status?: QAMessage['status']
+        artifacts?: QAReportArtifact[]
       }) => {
         useChatStore.setState((state) => {
           const msgs = [...(state.messagesBySession[uid] ?? [])]
@@ -588,14 +871,20 @@ export function ChatPage() {
         },
         onAgentIterationStarted(data) {
           if (!verifySeq(data.seq)) return
-          const iterationNo = data.iterationNo as number | undefined
+          const iterationNo = getIterationNo(data)
           const label = iterationNo != null ? `Agent 迭代 ${iterationNo}` : 'Agent 分析中'
-          const ex = steps.find((s) => s.type === 'agent_iteration' && s.status === 'running')
+          const ex = steps.find(
+            (s) =>
+              s.type === 'agent_iteration' &&
+              s.status === 'running' &&
+              (iterationNo == null || s.iterationNo === iterationNo),
+          )
           if (!ex) {
             steps.push({
               type: 'agent_iteration',
               label,
               status: 'running',
+              iterationNo,
             })
           }
           patchAssistant({ thinking: [...steps] })
@@ -604,32 +893,37 @@ export function ChatPage() {
           if (!verifySeq(data.seq)) return
           const raw = (data as Record<string, unknown>).step as Record<string, unknown> | undefined
           if (!raw) return
-          const safe = sanitizeThinkingStep(raw)
-          const idx = steps.findIndex((s) => s.type === safe.type)
-          if (idx >= 0) {
-            steps[idx] = safe
-          } else {
-            steps.push(safe)
-          }
+          const safe = sanitizeThinkingStep({
+            ...raw,
+            iterationNo: raw.iterationNo ?? data.iterationNo,
+          })
+          steps = upsertReasoningStep(steps, safe)
           patchAssistant({ thinking: [...steps] })
         },
         onToolStarted(data) {
           if (!verifySeq(data.seq)) return
-          const toolName = sanitizeToolName(data.toolName)
+          const toolName = getToolName(data)
           const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined
+          const iterationNo = getIterationNo(data)
           const idx =
             steps.push({
               type: 'tool_call',
               label: `调用: ${toolName}`,
               status: 'running',
+              argumentsSummary: getToolEventSummary(data, 'argumentsSummary'),
+              iterationNo,
+              startedAt: Date.now(),
+              toolCallId,
+              toolName,
             }) - 1
           if (toolCallId) toolStepIndex[toolCallId] = idx
           patchAssistant({ thinking: [...steps] })
         },
         onToolCompleted(data) {
           if (!verifySeq(data.seq)) return
-          const toolName = sanitizeToolName(data.toolName)
+          const toolName = getToolName(data)
           const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined
+          const artifact = getToolReportArtifact(data)
           // Match by toolCallId first, fallback to first running
           let idx = -1
           if (toolCallId && toolStepIndex[toolCallId] !== undefined) {
@@ -637,106 +931,59 @@ export function ChatPage() {
           } else {
             idx = steps.findIndex((s) => s.type === 'tool_call' && s.status === 'running')
           }
-          if (idx >= 0) {
+          const existingStep = idx >= 0 ? steps[idx] : undefined
+          if (existingStep) {
             steps[idx] = {
-              ...steps[idx],
+              ...existingStep,
               status: 'done' as const,
               label: `${toolName} 完成`,
-            } as QAThinkingStep
+              completedAt: Date.now(),
+              reportArtifact: artifact,
+              resultSummary: getToolEventSummary(data, 'resultSummary'),
+              toolName,
+            }
           }
-          patchAssistant({ thinking: [...steps] })
-
-          // Parse report artifact from tool result
-          const rawResult = (data as Record<string, unknown>).result as
-            Record<string, unknown> | undefined
-          const rawArtifact = rawResult?.reportArtifact
-          const artifact = parseReportArtifact(rawArtifact)
-          if (artifact) {
-            useChatStore.setState((prev) => {
-              const msgs = [...(prev.messagesBySession[uid] ?? [])]
-              const lastIdx = msgs.length - 1
-              const last = lastIdx >= 0 ? msgs[lastIdx] : undefined
-              if (last?.role === 'assistant') {
-                const existing = ((last as Record<string, unknown>).artifacts ??
-                  []) as QAReportArtifact[]
-                msgs[lastIdx] = {
-                  ...last,
-                  artifacts: [
-                    ...existing.filter((a) => {
-                      // reportId-based dedup: also removes old jobId-only entry
-                      if (artifact.reportId) {
-                        if (a.reportId === artifact.reportId) return false
-                        if (a.jobId && a.jobId === artifact.jobId) return false
-                        return true
-                      }
-                      const aKey = a.reportId ?? a.jobId ?? a.reportName ?? ''
-                      const bKey = artifact.jobId ?? artifact.reportName ?? ''
-                      return aKey !== bKey
-                    }),
-                    artifact,
-                  ],
-                } as QAMessage
-              }
-              return {
-                messagesBySession: { ...prev.messagesBySession, [uid]: msgs },
-              }
-            })
-          }
+          patchAssistant({
+            artifacts: mergeMessageReportArtifact(
+              useChatStore.getState().messagesBySession[uid]?.at(-1) as
+                QAMessageWithArtifacts | undefined,
+              artifact,
+            ),
+            thinking: [...steps],
+          })
         },
         onToolFailed(data) {
           if (!verifySeq(data.seq)) return
-          const toolName = sanitizeToolName(data.toolName)
+          const toolName = getToolName(data)
           const toolCallId = typeof data.toolCallId === 'string' ? data.toolCallId : undefined
+          const failedArtifact = getToolReportArtifact(data)
           let idx = -1
           if (toolCallId && toolStepIndex[toolCallId] !== undefined) {
             idx = toolStepIndex[toolCallId]
           } else {
             idx = steps.findIndex((s) => s.type === 'tool_call' && s.status === 'running')
           }
-          if (idx >= 0) {
+          const existingStep = idx >= 0 ? steps[idx] : undefined
+          if (existingStep) {
             steps[idx] = {
-              ...steps[idx],
+              ...existingStep,
               status: 'failed' as const,
               label: `${toolName} 失败`,
-            } as QAThinkingStep
+              completedAt: Date.now(),
+              errorSummary: getToolFailureSummary(data),
+              reportArtifact: failedArtifact,
+              resultSummary: getToolEventSummary(data, 'resultSummary'),
+              toolName,
+            }
           }
-          patchAssistant({ thinking: [...steps] })
-
-          // Parse report artifact from failed tool result
-          const rawFailedResult = (data as Record<string, unknown>).result as
-            Record<string, unknown> | undefined
-          const rawFailedArtifact = rawFailedResult?.reportArtifact
-          const failedArtifact = parseReportArtifact(rawFailedArtifact)
-          if (failedArtifact) {
-            useChatStore.setState((prev) => {
-              const msgs = [...(prev.messagesBySession[uid] ?? [])]
-              const lastIdx = msgs.length - 1
-              const last = lastIdx >= 0 ? msgs[lastIdx] : undefined
-              if (last?.role === 'assistant') {
-                const existing = ((last as Record<string, unknown>).artifacts ??
-                  []) as QAReportArtifact[]
-                msgs[lastIdx] = {
-                  ...last,
-                  artifacts: [
-                    ...existing.filter((a) => {
-                      if (failedArtifact.reportId) {
-                        if (a.reportId === failedArtifact.reportId) return false
-                        if (a.jobId && a.jobId === failedArtifact.jobId) return false
-                        return true
-                      }
-                      const aKey = a.reportId ?? a.jobId ?? a.reportName ?? ''
-                      const bKey = failedArtifact.jobId ?? failedArtifact.reportName ?? ''
-                      return aKey !== bKey
-                    }),
-                    failedArtifact,
-                  ],
-                } as QAMessage
-              }
-              return {
-                messagesBySession: { ...prev.messagesBySession, [uid]: msgs },
-              }
-            })
-          }
+          patchAssistant({
+            artifacts: mergeMessageReportArtifact(
+              useChatStore.getState().messagesBySession[uid]?.at(-1) as
+                QAMessageWithArtifacts | undefined,
+              failedArtifact,
+            ),
+            thinking: [...steps],
+          })
         },
         onAnswerDelta(data) {
           if (!verifySeq(data.seq)) return
@@ -760,6 +1007,7 @@ export function ChatPage() {
         onAnswerCompleted(data) {
           const runId = data.responseRunId as string | undefined
           if (runId) responseRunIdRef.current = runId
+          steps = finalizeThinkingStepsOnAnswerCompleted(steps)
           const serverMsgId =
             (data.assistantMessageId as string | undefined) ??
             (data.messageId as string | undefined)
@@ -875,7 +1123,24 @@ export function ChatPage() {
         },
       }
 
-      const { abort } = streamChat(uid, trimmed, streamHandlers)
+      // Collect ready attachment IDs at call time (latest store state)
+      const currentState = useChatStore.getState()
+      const currentAttachments = currentState.attachmentsBySession[uid] ?? []
+      const currentExcluded = currentState.excludedAttachmentIds[uid] ?? []
+      const attachmentIds = currentAttachments
+        .filter(
+          (a) =>
+            a.status === 'ready' && !currentExcluded.includes(a.id) && !a.id.startsWith('temp-'),
+        )
+        .map((a) => a.id)
+
+      const { abort } = streamChat(
+        uid,
+        trimmed,
+        streamHandlers,
+        undefined,
+        attachmentIds.length > 0 ? attachmentIds : undefined,
+      )
 
       abortRef.current = abort
     },
@@ -982,70 +1247,109 @@ export function ChatPage() {
   // ══════════════════════════════════════════════════════════════════════════
 
   return (
-    <div className="flex h-full">
-      {/* Left: session sidebar */}
-      <ChatSidebar
-        sessions={sidebarItems}
-        activeId={activeId ?? ''}
-        isLoading={sessionsLoading}
-        fetchError={sessionsError ? '加载会话列表失败，请检查网络连接' : null}
-        onRetryFetch={() => refetchSessions()}
-        onSelect={setActiveId}
-        onCreate={handleCreate}
-        onDelete={handleDelete}
-        onRename={handleRename}
-      />
+    <>
+      <div className="flex h-full">
+        {/* Left: session sidebar */}
+        <ChatSidebar
+          sessions={sidebarItems}
+          activeId={activeId ?? ''}
+          isLoading={sessionsLoading}
+          fetchError={sessionsError ? '加载会话列表失败，请检查网络连接' : null}
+          onRetryFetch={() => refetchSessions()}
+          onSelect={setActiveId}
+          onCreate={handleCreate}
+          onDelete={handleDelete}
+          onRename={handleRename}
+        />
 
-      {/* Right: main chat area — single input DOM node with FLIP animation */}
-      <div className="flex min-w-0 flex-1 flex-col relative">
-        {/* Messages — only when active */}
-        {chatPhase === 'active' && (
-          <div className="page-enter-right flex min-h-0 flex-1 flex-col">
-            <ChatMessages
-              messages={activeMessages}
-              streaming={streaming}
-              error={error}
-              onRetry={lastFailedMsg ? handleRetry : undefined}
-              onArtifactDownload={handleArtifactDownload}
-            />
-          </div>
-        )}
-
-        {/* Input area — ALWAYS the same DOM node (stable ref for FLIP).
-            empty: absolutely positioned at center. active/transitioning: static at bottom. */}
-        <div
-          className={
-            chatPhase === 'empty'
-              ? 'absolute inset-0 flex flex-col items-center justify-center gap-4 px-6'
-              : 'shrink-0'
-          }
-        >
-          <div ref={inputAreaRef} className={chatPhase === 'empty' ? 'w-[76%]' : 'w-full'}>
-            <ChatInput
-              onSend={sendMessage}
-              disabled={streaming}
-              value={inputText}
-              onChange={setInputText}
-              size={chatPhase === 'empty' ? 'large' : 'normal'}
-            />
-          </div>
-          {chatPhase === 'empty' && (
-            <div className="flex flex-wrap justify-center gap-2">
-              {SUGGESTED_PROMPTS.map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  className="flex items-center rounded-md border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary transition-all hover:bg-primary/10 hover:border-primary/50"
-                  onClick={() => handleSuggested(p)}
-                >
-                  <ArrowUpRight className="mr-1 inline-block size-3.5 shrink-0" />
-                  {p}
-                </button>
-              ))}
+        {/* Right: main chat area — single input DOM node with FLIP animation */}
+        <div className="flex min-w-0 flex-1 flex-col relative">
+          {/* Messages — only when active */}
+          {chatPhase === 'active' && (
+            <div className="page-enter-right flex min-h-0 flex-1 flex-col">
+              <ChatMessages
+                messages={activeMessages}
+                streaming={streaming}
+                error={error}
+                onRetry={lastFailedMsg ? handleRetry : undefined}
+                onArtifactDownload={handleArtifactDownload}
+              />
             </div>
           )}
+
+          {/* Input area — ALWAYS the same DOM node (stable ref for FLIP).
+            empty: absolutely positioned at center. active/transitioning: static at bottom. */}
+          <div
+            className={
+              chatPhase === 'empty'
+                ? 'absolute inset-0 flex flex-col items-center justify-center gap-4 px-6'
+                : 'shrink-0'
+            }
+          >
+            <div ref={inputAreaRef} className={chatPhase === 'empty' ? 'w-[76%]' : 'w-full'}>
+              {/* Attachment upload status indicator */}
+              <div className="mb-2">
+                <AttachmentUploadStatus
+                  sessionId={activeId}
+                  state={uploadState}
+                  onDismiss={dismissUpload}
+                />
+              </div>
+
+              {/* Attachment list */}
+              <AttachmentList
+                attachments={activeAttachments}
+                excludedIds={activeExcludedIds}
+                onToggleExcluded={handleToggleAttachmentExcluded}
+                onDelete={handleDeleteAttachment}
+                sessionId={activeId}
+              />
+
+              <ChatInput
+                onSend={sendMessage}
+                disabled={streaming}
+                streaming={streaming}
+                onStop={() => abortRef.current?.()}
+                value={inputText}
+                onChange={setInputText}
+                size={chatPhase === 'empty' ? 'large' : 'normal'}
+                onFileSelect={handleFileSelect}
+                onAttachError={(msg) => setError(msg)}
+                attachmentCount={visibleAttachmentCount}
+                disableAttach={!activeId}
+              />
+            </div>
+            {chatPhase === 'empty' && (
+              <div className="flex flex-wrap justify-center gap-2">
+                {SUGGESTED_PROMPTS.map((p, i) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className="flex items-center rounded-md border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary transition-all hover:bg-primary/10 hover:border-primary/50 animate-[fade-in-up_0.4s_ease-out_both]"
+                    style={{ animationDelay: `${i * 150}ms` }}
+                    onClick={() => handleSuggested(p)}
+                  >
+                    <ArrowUpRight className="mr-1 inline-block size-3.5 shrink-0" />
+                    {p}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </div>
+      <ConfirmDialog
+        cancelLabel="取消"
+        confirmLabel="确认删除"
+        description="附件删除后本次对话将无法引用，确认删除？"
+        onConfirm={() => void confirmDeleteAttachment()}
+        onOpenChange={(open) => {
+          if (!open) setDeleteAttachmentTarget(null)
+        }}
+        open={Boolean(deleteAttachmentTarget)}
+        title="确定删除该附件？"
+        variant="destructive"
+      />
+    </>
   )
 }

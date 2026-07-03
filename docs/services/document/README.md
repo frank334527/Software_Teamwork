@@ -19,6 +19,7 @@ RESTful 路径、统一响应和错误 envelope 以 [前后端集成契约](../.
 | [`docs/frontend-api-design.md`](docs/frontend-api-design.md) | 前端 API 层、页面到接口映射和类型使用建议。 |
 | [`docs/generation-workflow.md`](docs/generation-workflow.md) | 报告 job、attempt、event、worker、AI Gateway、File Service 和 DOCX 创建的目标流程与当前缺口。 |
 | [`docs/implementation.md`](docs/implementation.md) | 当前代码实现、契约对齐、缺口和最近检查记录。 |
+| [`docs/mcp-tools.md`](docs/mcp-tools.md) | Document MCP 的 9 个当前工具、精确参数、注册方式、返回结构与 Agent 调用工作流。 |
 | [`docs/requirements.md`](docs/requirements.md) | 原始报告生成需求沉淀和验收点。 |
 
 已被 gateway OpenAPI 和本文覆盖的重复 API 契约草稿不再作为当前阅读入口；数据模型、前端 API 设计和需求沉淀这类服务细节文档单独保留。
@@ -29,7 +30,7 @@ RESTful 路径、统一响应和错误 envelope 以 [前后端集成契约](../.
 
 - 代码落地时使用独立 Go module，服务代码放在 `services/document/`。
 - 使用 `asynq` over Redis 执行大纲、正文、章节和 DOCX 创建任务；PostgreSQL 是任务业务状态权威。
-- 当前 `summer_peak_inspection` 固定报告类型已支持通过 AI Gateway chat 完成基础大纲生成和逐章节正文生成，成功结果写入大纲、章节和章节版本。
+- 当前 `summer_peak_inspection` 和 `coal_inventory_audit` 两个固定报告类型已支持通过 AI Gateway chat 完成基础大纲生成和逐章节正文生成，成功结果写入大纲、章节和章节版本。
 - 生成请求可通过 `options.knowledgeBaseIds` 等检索参数在配置了 Knowledge 服务时获取受控材料上下文；`document` 不直接访问 Qdrant。
 - 当前基础 DOCX 导出由 Document worker 内置 Go `SimpleDOCXGenerator` 完成，并通过 `file` 服务保存底层 bytes；Pandoc/LibreOffice 仅作为后续富 DOCX worker 工具链，落地前不作为当前运行依赖。
 - 报告生成链路是后续 OpenTelemetry tracing 重点。
@@ -131,7 +132,7 @@ JSON 成功、分页和错误响应遵循 [前后端集成契约](../../architec
 ### 生成正文和重新生成
 
 1. 调用方通过 `POST /api/v1/reports/{reportId}/jobs` 创建 `content_generation` 或 `content_regeneration` 任务。
-2. 当前实现会由 worker 通过 AI Gateway chat 逐章节生成正文，保存章节内容、结构化表格、章节版本和任务进度；首个闭环固定报告类型为 `summer_peak_inspection`。
+2. 当前实现会由 worker 通过 AI Gateway chat 逐章节生成正文，保存章节内容、结构化表格、章节版本和任务进度；两个内置闭环固定报告类型为 `summer_peak_inspection` 和 `coal_inventory_audit`。
 3. 部分章节失败时，已成功章节不得丢失；任务可进入 `partial_succeeded` 或 `failed`，具体枚举以 OpenAPI 为准。
 4. 单章重新生成通过 `POST /api/v1/reports/{reportId}/sections/{sectionId}/versions` 创建新章节版本。`preserveUserEdits` 默认应为 `true`，只有调用方显式传 `false` 才覆盖用户编辑内容。
 
@@ -219,7 +220,7 @@ outline_generation | outline_regeneration | content_generation | content_regener
 
 ### QA 与 MCP 工具
 
-Document 当前已在 `services/document/internal/service/mcp_tools.go` 提供服务内 MCP 工具适配层。该适配层接收可信 `RequestContext`，复用现有 Document service 能力，记录 `requestSource=mcp` 和 `toolName=<tool>` 的安全操作日志；远程 MCP server 包装和 QA 端到端 smoke 仍待共享 MCP 联调任务补齐。
+Document 当前已在 `services/document/internal/service/mcp_tools.go` 提供服务内 MCP 工具适配层，并通过 `internal/platform/mcpserver` 暴露 Streamable HTTP `/mcp` server。工具适配层接收可信 `RequestContext`，复用现有 Document service 能力，记录 `requestSource=mcp` 和 `toolName=<tool>` 的安全操作日志；QA 侧已有 env-gated report tools smoke，完整共享环境的 Gateway/Auth/worker/download 验收仍待 #125 smoke 收口。
 
 当前工具包括：
 
@@ -264,7 +265,7 @@ Document 相关接口使用项目统一错误码：
 - 当前大纲/正文生成由 worker 通过 AI Gateway chat 完成，不保存 provider base URL/API key，不直连 provider；当前 DOCX 创建由 worker 调用内置 `SimpleDOCXGenerator` 完成，生成后通过 file 服务保存底层对象；富 DOCX 工具链如后续引入，必须同步部署和技术基线。
 - 服务日志和指标不得记录 prompt 全文、文档全文、`file_ref`、object key、token、API key 或 provider 原始响应体。
 - 模板文件首期限定 DOCX；模板结构、默认章节和材料映射以数据库配置为权威，不从 DOCX 自动解析。
-- 首期 AI 生成闭环覆盖 `summer_peak_inspection`；新增报告类型或更复杂的检索/流式事件前必须确保 OpenAPI、状态枚举和错误处理已同步。
+- 首期 AI 生成闭环覆盖 `summer_peak_inspection` 和 `coal_inventory_audit`；新增其他报告类型或更复杂的检索/流式事件前必须确保 OpenAPI、状态枚举和错误处理已同步。
 - 契约测试应覆盖 active document operations 的 response envelope、字段命名、错误码、request id、权限边界和文件内容接口。
 
 ## C-010 跨服务契约验证
@@ -279,4 +280,4 @@ go build ./cmd/server
 
 这些测试覆盖 Document 调用 File Service `/internal/v1/files/**`、`X-Service-Token` 透传、模板/素材/报告文件公开响应脱敏、报告文件 content 成功二进制返回、失败 JSON error envelope，以及 fake 依赖失败到 `dependency_error` 的映射。
 
-需要完整联调时，先通过 gateway 访问公开 `/api/v1/**` 路径，并确保 Document、File、Redis、AI Gateway 可用；如果生成请求使用知识库上下文，还需要 Knowledge。联调时重点检查 `X-Request-Id` 贯穿日志，File Service token 匹配，报告文件 content 未就绪时返回统一错误 envelope。当前富 DOCX 的 Pandoc/LibreOffice 工具链、Document MCP tools 和 `coal_inventory_audit` 生成策略仍是后续任务，不能作为 C-010 验收前提。
+需要完整联调时，先通过 gateway 访问公开 `/api/v1/**` 路径，并确保 Document、File、Redis、AI Gateway 可用；如果生成请求使用知识库上下文，还需要 Knowledge。联调时重点检查 `X-Request-Id` 贯穿日志，File Service token 匹配，报告文件 content 未就绪时返回统一错误 envelope。当前服务内 Document MCP 工具适配层和 Streamable HTTP `/mcp` server 已存在，QA 侧也有 env-gated report tools smoke；但共享环境中的 Gateway/Auth/worker/download 完整验收、富 DOCX 的 Pandoc/LibreOffice 工具链和新增第三类报告生成策略仍是后续任务，不能作为 C-010 验收前提。

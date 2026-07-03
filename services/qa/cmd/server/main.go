@@ -81,15 +81,7 @@ func main() {
 		logger.Error("file client initialization failed", "service", "qa", "error", err)
 		os.Exit(1)
 	}
-	parserClient, err := attachmentclient.NewParserHTTPClient(attachmentclient.ParserHTTPConfig{
-		BaseURL:      cfg.ParserServiceBaseURL,
-		ServiceToken: cfg.ParserServiceToken,
-		Timeout:      cfg.ParserServiceTimeout,
-	})
-	if err != nil {
-		logger.Error("parser client initialization failed", "service", "qa", "error", err)
-		os.Exit(1)
-	}
+	parserClient := attachmentclient.PlainTextParserClient{}
 	attachmentService, err := service.NewAttachmentService(repo, fileClient, parserClient, service.AttachmentServiceConfig{TTL: cfg.AttachmentTTL, MaxBytes: cfg.AttachmentMaxBytes, MaxPerSession: cfg.AttachmentMaxPerSession, ProcessTimeout: cfg.AttachmentProcessTimeout})
 	if err != nil {
 		logger.Error("attachment service initialization failed", "service", "qa", "error", err)
@@ -100,6 +92,9 @@ func main() {
 		MaxToolResultBytes: cfg.MaxToolResultBytes, EnableCommandTool: cfg.EnableCommandTool,
 		CommandTimeout: cfg.CommandTimeout, MaxIterations: cfg.MaxIterations,
 		DefaultToolTimeout: cfg.MCPToolTimeout,
+		KnowledgeMCPURL:    cfg.KnowledgeMCPURL, KnowledgeMCPToken: cfg.KnowledgeMCPToken,
+		KnowledgeMCPTokenHeader: cfg.KnowledgeMCPTokenHeader,
+		KnowledgeMCPAlias:       cfg.KnowledgeMCPAlias, KnowledgeMCPTimeout: cfg.KnowledgeMCPTimeout,
 	})
 	if err != nil {
 		logger.Error("agent runtime initialization failed", "service", "qa", "error", err)
